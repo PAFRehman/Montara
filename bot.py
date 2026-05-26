@@ -1,4 +1,4 @@
-import os, sys, asyncio, time, random, io, datetime
+import os, sys, asyncio, time, random, io, datetime, re
 from collections import defaultdict
 import aiohttp
 import discord
@@ -63,11 +63,21 @@ COMMODITIES = {
     "copper":    {"symbol":"COPPER","name":"Copper",    "emoji":"🟤","unit":"lb","fallback":4.2},
     "wheat":     {"symbol":"WHEAT","name":"Wheat",      "emoji":"🌾","unit":"bu","fallback":560.0},
     "corn":      {"symbol":"CORN","name":"Corn",        "emoji":"🌽","unit":"bu","fallback":450.0},
+    "coffee":    {"symbol":"KC.F","name":"Coffee (Arabica)","emoji":"☕","unit":"lb","fallback":2.75},
+    "sugar":     {"symbol":"SB.F","name":"Sugar #11",  "emoji":"🍬","unit":"lb","fallback":0.145},
+    "cocoa":     {"symbol":"CC.F","name":"Cocoa",      "emoji":"🍫","unit":"ton","fallback":3800.0},
+    "cotton":    {"symbol":"CT.F","name":"Cotton",     "emoji":"👕","unit":"lb","fallback":0.79},
+    "lumber":    {"symbol":"LB.F","name":"Lumber",     "emoji":"🪵","unit":"board ft","fallback":590.0},
+    "oj":        {"symbol":"OJ.F","name":"Orange Juice","emoji":"🍊","unit":"lb","fallback":1.60},
+    "cattle":    {"symbol":"LE.F","name":"Live Cattle","emoji":"🐄","unit":"lb","fallback":2.45},
+    "hogs":      {"symbol":"HE.F","name":"Lean Hogs",  "emoji":"🐖","unit":"lb","fallback":1.02},
+    "feeder":    {"symbol":"GF.F","name":"Feeder Cattle","emoji":"🐂","unit":"lb","fallback":3.60},
+    "milk":      {"symbol":"DL.F","name":"Class III Milk","emoji":"🥛","unit":"cwt","fallback":17.5},
 }
 
 # ── SMOKING DATA ──────────────────────────────────────────────────────────────
 SMOKING = {
-    "facts": [
+    "lines": [
         "🚬 Cigarettes: the only product that kills its best customers",
         "💨 7,000+ chemicals in smoke — but hey, at least it's organic",
         "🧠 Nicotine hits your brain in 10 seconds. Your morning coffee wishes it were that fast",
@@ -78,8 +88,6 @@ SMOKING = {
         "📉 Global smoking rates declining — quitters are the new cool kids",
         "🫁 Smoker's lungs are basically a charcoal filter that talks",
         "❤️ Your heart beats 36,000 times a day — smoke gives it overtime pay",
-    ],
-    "funny": [
         "🚬 Smoking: because sometimes you need a fire alarm that fits in your pocket",
         "😂 A cigarette is like a friend — it hangs around, costs money, and slowly kills you",
         "🌫️ Smoking doesn't kill you, it just makes you look cool while slowly regretting it",
@@ -90,42 +98,6 @@ SMOKING = {
         "🎭 Every cigarette is a tiny drama in 5 minutes",
         "☕ Coffee + cigarette = breakfast of champions (historically speaking)",
         "🚬 Smoking cures salmon. Coincidence? Nobody thinks about that",
-    ],
-    "quit_tips": [
-        "💡 Pick a quit date. Write it. Tell someone. Now it's real",
-        "🍬 Nicotine patches, gum, lozenges — modern science is on your side",
-        "🏃 Craving? Run around the block. You'll either forget the craving or pass out",
-        "💧 Water trick: drink a full glass slowly when a craving hits — 3 mins and it's gone",
-        "🧘 Deep breath: in 4s, hold 4s, out 4s. Free and it actually works",
-        "💰 Save every cigarette dollar — watch the number grow, then book a flight",
-        "🫂 Tell your crew you're quitting — social pressure works both ways",
-        "📵 Delete your dealer's number. Same energy",
-        "🎮 Replace the habit: gum, toothpick, fidget toy, literally anything",
-        "🏆 1 week clean = buy yourself something nice. You earned it",
-    ],
-    "damage_timeline": {
-        "20 min":  "Heart rate & blood pressure drop to normal",
-        "12 hrs":  "Carbon monoxide levels in blood normalize",
-        "2 weeks": "Circulation improves, lung function increases",
-        "1 month": "Less coughing, less shortness of breath",
-        "1 year":  "Heart disease risk is cut in HALF",
-        "5 years": "Stroke risk equals a non-smoker",
-        "10 years":"Lung cancer risk halved vs still smoking",
-        "15 years":"Heart disease risk same as someone who never smoked",
-    },
-    "brands": {
-        "Marlboro":    "The cowboy's cigarette. Rugged. Classic. The iPhone of smokes.",
-        "Camel":       "Preferred by 9 out of 10 cartoon doctors in 1950s ads. Smooth.",
-        "Newport":     "Menthol gang. Cool on the way in, still a cigarette on the way out.",
-        "Lucky Strike":"Retro vibes. WWII era. Basically vintage at this point.",
-        "Dunhill":     "The business-class cigarette. Expensive regrets, premium packaging.",
-        "Parliament":  "Recessed filter = fancy. For smokers who take themselves seriously.",
-        "Winston":     "No additives. The 'all natural' option for health-conscious smokers 😂",
-        "Benson & Hedges":"British royalty used to smoke these. Go off, king.",
-        "Pall Mall":   "Budget-friendly. The value investor of the cigarette world.",
-        "Cohiba":      "Technically a cigar but feels wrong to leave it out. Cuban royalty.",
-    },
-    "rules": [
         "🚬 Rule #1: Always have a lighter. Always.",
         "🤝 Rule #2: Never refuse to give a light. Smoker code.",
         "🚭 Rule #3: Never bum 3 in a row without buying a pack",
@@ -136,15 +108,34 @@ SMOKING = {
         "🌅 Rule #8: First smoke of the day after coffee is undefeated",
         "🍺 Rule #9: Any cigarette after a meal is automatically elite",
         "🏁 Rule #10: The last cigarette in the pack always tastes the best",
-    ],
+        "🏷️ Marlboro: The cowboy's cigarette. Rugged. Classic. The iPhone of smokes.",
+        "🏷️ Camel: Preferred by 9 out of 10 cartoon doctors in 1950s ads. Smooth.",
+        "🏷️ Newport: Menthol gang. Cool on the way in, still a cigarette on the way out.",
+        "🏷️ Lucky Strike: Retro vibes. WWII era. Basically vintage at this point.",
+        "🏷️ Dunhill: The business-class cigarette. Expensive regrets, premium packaging.",
+        "🏷️ Parliament: Recessed filter = fancy. For smokers who take themselves seriously.",
+        "🏷️ Winston: No additives. The 'all natural' option for health-conscious smokers 😂",
+        "🏷️ Benson & Hedges: British royalty used to smoke these. Go off, king.",
+        "🏷️ Pall Mall: Budget-friendly. The value investor of the cigarette world.",
+        "🏷️ Cohiba: Technically a cigar but feels wrong to leave it out. Cuban royalty.",
+        "💸 In 2024, a pack averages $8.00 in the US. In Australia it's $30+. Wallet cry.",
+        "🏭 Big Tobacco still makes $800+ billion a year. Your lungs are a revenue stream.",
+        "💳 A pack-a-day smoker at $8/pack burns $2,920/year. Invested at 7% for 20 years = ~$120,000. You smoked a Tesla.",
+        "🌍 Most expensive cigarette? Sobranie Black Russian. $100+/pack in some countries.",
+        "📊 Cigarette taxes fund highways, schools, and hospitals. You're basically a philanthropist.",
+        "🎰 Smokers are 2x more likely to play the lottery. Risk tolerance is a lifestyle.",
+        "🏠 The only thing that appreciates faster than real estate is cigarette prices.",
+        "💰 Rolling your own saves ~60%. The FIRE movement for smokers.",
+        "🧾 A smoker's monthly budget: rent, groceries, Netflix, and setting money on fire.",
+        "📈 Philip Morris stock has outperformed the S&P 500 for decades. You're funding a dividend aristocrat.",
+        "🎩 Vaping costs 30-50% less than cigarettes, which is why Big Tobacco bought the vape companies.",
+    ]
 }
 
 # ── STATE ─────────────────────────────────────────────────────────────────────
 guild_settings  = defaultdict(lambda: {"channel_restrictions": {}, "role_restrictions": {}})
 music_queues    = defaultdict(list)
 now_playing     = {}   # guild_id -> title
-quit_trackers   = {}   # user_id -> {quit_time, cpd, ppp}
-smoke_sessions  = {}   # user_id -> {start_time, count}
 
 # ── BOT SETUP ─────────────────────────────────────────────────────────────────
 intents = discord.Intents.all()
@@ -229,29 +220,35 @@ async def fetch_crypto(symbol: str):
     return None
 
 async def fetch_commodity_price(key: str):
-    """Try metals-api, fallback to stooq, fallback to static."""
+    """Live APIs: metals.live → frankfurter → stooq futures → static fallback."""
     info = COMMODITIES[key]
     sym  = info["symbol"]
 
-    # Attempt 1: metals.live
-    try:
-        data = await fetch_json(f"https://api.metals.live/v1/spot/{sym.lower()}")
-        if isinstance(data, list) and data:
-            val = list(data[0].values())[0]
-            if val: return float(val), False
-    except: pass
-
-    # Attempt 2: frankfurter for XAU/XAG (EUR base, convert)
+    # Attempt 1: metals.live (precious metals spot)
     if sym in ("XAU","XAG","XPT","XPD"):
+        try:
+            data = await fetch_json(f"https://api.metals.live/v1/spot/{sym.lower()}")
+            if isinstance(data, list) and data:
+                val = list(data[0].values())[0]
+                if val: return float(val), False
+        except: pass
+
+        # Attempt 2: frankfurter EUR cross for precious metals
         try:
             data = await fetch_json(f"https://api.frankfurter.app/latest?from=USD&to={sym}")
             rate = data.get("rates",{}).get(sym)
             if rate: return round(1/rate, 2), False
         except: pass
 
-    # Attempt 3: stooq CSV for commodities
-    stooq_map = {"BRENTOIL":"@CL.F","NATGAS":"@NG.F","COPPER":"HG.F","WHEAT":"@W.F","CORN":"@C.F"}
-    stooq_sym = stooq_map.get(sym)
+    # Attempt 3: stooq futures CSV (real-time market data)
+    stooq_map = {
+        "BRENTOIL":"@CL.F","NATGAS":"@NG.F","COPPER":"HG.F",
+        "WHEAT":"@W.F","CORN":"@C.F",
+        "KC.F":"KC.F","SB.F":"SB.F","CC.F":"CC.F","CT.F":"CT.F",
+        "LB.F":"LB.F","OJ.F":"OJ.F","LE.F":"LE.F","HE.F":"HE.F",
+        "GF.F":"GF.F","DL.F":"DL.F",
+    }
+    stooq_sym = stooq_map.get(sym, sym if sym.endswith(".F") else None)
     if stooq_sym:
         try:
             url  = f"https://stooq.com/q/l/?s={stooq_sym}&f=sd2t2ohlcv&h&e=csv"
@@ -260,8 +257,8 @@ async def fetch_commodity_price(key: str):
                     text = await r.text()
             lines = text.strip().split("\n")
             if len(lines) >= 2:
-                cols  = lines[1].split(",")
-                price = float(cols[4])   # close price
+                cols  = lines[-1].split(",")   # last data row
+                price = float(cols[4])        # close price
                 if price > 0: return price, False
         except: pass
 
@@ -309,12 +306,11 @@ async def crypto_chart_buf(coin_id: str, days: int) -> io.BytesIO | None:
         return None
 
 async def commodity_chart_buf(key: str) -> io.BytesIO | None:
-    """Generate a simulated 30-day commodity chart using daily price + noise."""
+    """Generate a simulated 30-day commodity chart around the live price."""
     try:
         price, is_fallback = await fetch_commodity_price(key)
         info  = COMMODITIES[key]
 
-        # Build synthetic 30-day series around current price
         np.random.seed(int(price) % 9999)
         days  = 30
         noise = np.cumsum(np.random.randn(days) * price * 0.008)
@@ -358,25 +354,76 @@ FFMPEG_OPTS = {
         "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
         "-probesize 200M -analyzeduration 200M"
     ),
-    "options": "-vn -ar 48000 -ac 2 -b:a 192k"
+    "options": (
+        "-vn -ar 48000 -ac 2 -b:a 192k "
+        "-af loudnorm=I=-14:TP=-1.5:LRA=11"
+    ),
 }
 
 async def resolve_audio(query: str):
     import yt_dlp
+
+    original_query = query.strip()
+
+    # ── Spotify → YouTube search conversion ──────────────────────────────
+    spotify_re = re.compile(r'https?://open\.spotify\.com/track/([a-zA-Z0-9]+)')
+    m = spotify_re.match(original_query)
+    if m:
+        try:
+            track_id = m.group(1)
+            oembed   = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{track_id}"
+            async with aiohttp.ClientSession() as s:
+                async with s.get(oembed, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        q = f"{data.get('title','')} {data.get('author_name','')} audio"
+                        query = q.strip()
+        except Exception as e:
+            print(f"Spotify resolve error: {e}")
+            query = original_query
+
+    # ── yt-dlp options ─────────────────────────────────────────────────────
+    cookie_file    = os.getenv("YTDLP_COOKIES", "")
+    cookie_browser = os.getenv("YTDLP_COOKIES_BROWSER", "")
+
     opts = {
-        "format": "bestaudio[ext=webm]/bestaudio/best",
-        "quiet": True, "no_warnings": True,
+        "format": "bestaudio[ext=webm][acodec=opus]/bestaudio[ext=m4a][acodec=aac]/bestaudio/best",
+        "quiet": True,
+        "no_warnings": True,
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
         "noplaylist": True,
-        "postprocessors": [],
+        "geo_bypass": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "android", "tv"],
+                "player_skip": ["webpage", "configs", "js"],
+            }
+        },
     }
+    if cookie_file and os.path.exists(cookie_file):
+        opts["cookies"] = cookie_file
+    elif cookie_browser:
+        opts["cookiesfrombrowser"] = cookie_browser
+
     loop = asyncio.get_event_loop()
+
     def _extract():
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(query, download=False)
-            if "entries" in info: info = info["entries"][0]
-            return info.get("url"), info.get("title", query), info.get("thumbnail"), info.get("duration",0)
+            if "entries" in info:
+                info = info["entries"][0]
+
+            fmts = [f for f in info.get("formats", [])
+                    if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+            if fmts:
+                fmts.sort(key=lambda f: (f.get("abr") or 0), reverse=True)
+                url = fmts[0]["url"]
+            else:
+                url = info.get("url")
+
+            return url, info.get("title", query), info.get("thumbnail"), info.get("duration", 0)
+
     return await loop.run_in_executor(None, _extract)
 
 async def play_next(guild: discord.Guild, channel: discord.TextChannel = None):
@@ -563,7 +610,7 @@ async def cmd_coins(interaction: discord.Interaction):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @tree.command(name="commodity", description="Real-time price + chart for gold, silver, oil, and more")
-@app_commands.describe(item="gold · silver · platinum · palladium · oil · gas · copper · wheat · corn")
+@app_commands.describe(item="gold · silver · platinum · palladium · oil · gas · copper · wheat · corn · coffee · sugar · cocoa · cotton · lumber · oj · cattle · hogs · feeder · milk")
 async def cmd_commodity(interaction: discord.Interaction, item: str):
     if not check_allowed(interaction, "commodity"):
         await interaction.response.send_message("❌ Not allowed here.", ephemeral=True); return
@@ -599,7 +646,7 @@ async def cmd_commodity(interaction: discord.Interaction, item: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @tree.command(name="play", description="Play a song in your voice channel")
-@app_commands.describe(query="Song name or YouTube URL")
+@app_commands.describe(query="Song name, YouTube URL, or Spotify track URL")
 async def cmd_play(interaction: discord.Interaction, query: str):
     if not check_allowed(interaction, "play"):
         await interaction.response.send_message("❌ Not allowed here.", ephemeral=True); return
@@ -700,165 +747,15 @@ async def cmd_nowplaying(interaction: discord.Interaction):
 # SLASH COMMANDS — SMOKING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@tree.command(name="smoke", description="Smoking facts, funny takes, quit tips, rules & more")
-@app_commands.describe(category="facts · funny · quit · timeline · rules · brand · random")
-async def cmd_smoke(interaction: discord.Interaction, category: str = "random"):
-    cat   = category.lower().strip()
-    embed = discord.Embed(timestamp=datetime.datetime.utcnow())
-
-    if cat == "facts":
-        embed.title = "🚬 Smoking Facts"
-        embed.color = 0xff6600
-        embed.description = "\n".join(SMOKING["facts"])
-
-    elif cat == "funny":
-        embed.title = "😂 Cigarette Humour"
-        embed.color = 0xffcc00
-        embed.description = "\n".join(SMOKING["funny"])
-
-    elif cat == "quit":
-        embed.title = "💪 Quit Tips"
-        embed.color = 0x00cc66
-        embed.description = "\n".join(SMOKING["quit_tips"])
-
-    elif cat == "timeline":
-        embed.title = "⏳ Recovery Timeline After Quitting"
-        embed.color = 0x00aaff
-        for k,v in SMOKING["damage_timeline"].items():
-            embed.add_field(name=f"⏰ {k}", value=v, inline=True)
-
-    elif cat == "rules":
-        embed.title = "📜 Unwritten Rules of Smoking"
-        embed.color = 0xaa6644
-        embed.description = "\n".join(SMOKING["rules"])
-
-    elif cat == "brand":
-        embed.title = "🏷️ Cigarette Brand Reviews"
-        embed.color = 0x8b4513
-        for brand,desc in SMOKING["brands"].items():
-            embed.add_field(name=brand, value=desc, inline=False)
-
-    else:  # random
-        all_lines = SMOKING["facts"] + SMOKING["funny"] + SMOKING["quit_tips"] + SMOKING["rules"]
-        embed.title = "🚬 Random Smoke Thought"
-        embed.color = random.choice([0xff6600,0xffcc00,0x00cc66,0xaa6644])
-        embed.description = random.choice(all_lines)
-
-    embed.set_footer(text="/smoke  facts · funny · quit · timeline · rules · brand · random")
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
-
-@tree.command(name="quittrack", description="Start tracking your quit-smoking journey")
-@app_commands.describe(cigs_per_day="Cigarettes you smoked per day", price_per_pack="Pack price in USD (20 cigs)")
-async def cmd_quittrack(interaction: discord.Interaction, cigs_per_day: int = 10, price_per_pack: float = 7.0):
-    uid = interaction.user.id
-    quit_trackers[uid] = {"quit_time": now_ts(), "cpd": cigs_per_day, "ppp": price_per_pack}
+@tree.command(name="smoke", description="Random smoking facts, jokes, rules & brand roasts")
+async def cmd_smoke(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🏆 Quit Tracker Started",
-        description=f"{interaction.user.mention} — your clock starts **now**.\nTracking {cigs_per_day} cigs/day at ${price_per_pack:.2f}/pack.",
-        color=0x00ff88, timestamp=datetime.datetime.utcnow()
-    )
-    embed.add_field(name="💡 Tip", value=random.choice(SMOKING["quit_tips"]), inline=False)
-    embed.set_footer(text="Use /quitstats to see your progress anytime")
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(uid))
-
-@tree.command(name="quitstats", description="Check your quit-smoking progress & savings")
-async def cmd_quitstats(interaction: discord.Interaction):
-    uid = interaction.user.id
-    if uid not in quit_trackers:
-        await interaction.response.send_message("❌ Start with `/quittrack` first.", ephemeral=True); return
-    d       = quit_trackers[uid]
-    elapsed = now_ts() - d["quit_time"]
-    days    = elapsed/86400; hrs = elapsed/3600; mins = elapsed/60
-    avoided = int(days * d["cpd"])
-    saved   = (avoided/20)*d["ppp"]
-    life_m  = avoided * 11
-
-    embed = discord.Embed(title=f"🏆 {interaction.user.display_name}'s Quit Stats",
-                          color=0x00ff88, timestamp=datetime.datetime.utcnow())
-    embed.add_field(name="⏱️ Smoke-Free",    value=f"{int(days)}d {int(hrs%24)}h {int(mins%60)}m", inline=True)
-    embed.add_field(name="🚫 Cigs Dodged",   value=f"{avoided:,}",                                 inline=True)
-    embed.add_field(name="💰 Money Saved",   value=f"${saved:,.2f}",                               inline=True)
-    embed.add_field(name="❤️ Life Regained", value=f"~{life_m//60}h {life_m%60}m",                 inline=True)
-    milestones = []
-    if days>=1:   milestones.append("🥉 1 Day")
-    if days>=7:   milestones.append("🥈 1 Week")
-    if days>=30:  milestones.append("🥇 1 Month")
-    if days>=90:  milestones.append("💎 3 Months")
-    if days>=365: milestones.append("🏆 1 YEAR!")
-    if milestones: embed.add_field(name="🎖️ Badges", value="  ".join(milestones), inline=False)
-    embed.set_footer(text="Keep going — every minute counts")
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(uid))
-
-@tree.command(name="smokebreak", description="Log a smoke break — track how many you're having today")
-async def cmd_smokebreak(interaction: discord.Interaction):
-    uid  = interaction.user.id
-    today = datetime.date.today().isoformat()
-    sess = smoke_sessions.setdefault(uid, {"date": today, "count": 0})
-    if sess["date"] != today:
-        sess["date"] = today; sess["count"] = 0
-    sess["count"] += 1
-    count = sess["count"]
-    comments = [
-        "One down. At least you're honest with yourself.",
-        "Two. The slippery slope begins.",
-        "Three. Classic triple threat.",
-        "Four. Your lungs filed a formal complaint.",
-        "Five. Halfway to a pack. Impressive commitment.",
-        "Six+. At this point you're basically a chimney. Own it.",
-    ]
-    comment = comments[min(count-1, len(comments)-1)]
-    embed = discord.Embed(
-        title=f"🚬 Smoke Break #{count} Today",
-        description=comment,
-        color=0xffaa33,
+        title="🚬 Random Smoke Thought",
+        description=random.choice(SMOKING["lines"]),
+        color=random.choice([0xff6600, 0xffcc00, 0xaa6644, 0x8b4513, 0xff4444]),
         timestamp=datetime.datetime.utcnow()
     )
-    embed.set_footer(text="Use /dailysmokes to see your full day")
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(uid))
-
-@tree.command(name="dailysmokes", description="See how many smoke breaks you've logged today")
-async def cmd_dailysmokes(interaction: discord.Interaction):
-    uid   = interaction.user.id
-    today = datetime.date.today().isoformat()
-    sess  = smoke_sessions.get(uid)
-    if not sess or sess["date"] != today:
-        await interaction.response.send_message("No smokes logged today. Use `/smokebreak` to log one.", ephemeral=True); return
-    count = sess["count"]
-    embed = discord.Embed(
-        title=f"📊 {interaction.user.display_name}'s Smoke Log",
-        description=f"You've had **{count}** cigarette{'s' if count!=1 else ''} today.",
-        color=0xff6600,
-        timestamp=datetime.datetime.utcnow()
-    )
-    cigs_cost = (count/20) * 7.0
-    embed.add_field(name="💰 Cost Today",   value=f"~${cigs_cost:.2f}", inline=True)
-    embed.add_field(name="⏳ Life Spent",   value=f"~{count*11} minutes", inline=True)
-    if count <= 5:   embed.add_field(name="Verdict", value="Respectable restraint 👏", inline=False)
-    elif count <= 10: embed.add_field(name="Verdict", value="Committed smoker 🚬", inline=False)
-    else:             embed.add_field(name="Verdict", value="You ARE the cigarette now 🌫️", inline=False)
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(uid))
-
-@tree.command(name="cravingkiller", description="Hit this when you're craving a cigarette — distraction tactics")
-async def cmd_cravingkiller(interaction: discord.Interaction):
-    tactics = [
-        "🏃 Drop and do 15 push-ups. Craving will be gone by rep 8.",
-        "💧 Drink a full glass of cold water slowly. Works in 3 minutes.",
-        "🧘 Box breathing: inhale 4s → hold 4s → exhale 4s. Repeat 4x.",
-        "🍬 Chew gum aggressively. Jaw busy = brain distracted.",
-        "📱 Text someone random 'hey'. By the time they reply, craving's dead.",
-        "🎮 Open a game. 5 minutes of anything beats a 5-minute cig.",
-        "🚿 Splash cold water on your face. Chemical reset. Costs nothing.",
-        "👃 Sniff something strong — coffee beans, peppermint oil, literally anything.",
-        "✏️ Write down why you want to quit. Read it out loud. Cringe. Repeat.",
-        "🌅 Go outside but DON'T smoke. Just stand there and breathe. Power move.",
-    ]
-    embed = discord.Embed(
-        title="💪 Craving Killer",
-        description=f"**Try this right now:**\n\n{random.choice(tactics)}\n\n*Cravings peak at ~3 minutes and then fade. You just need to outlast it.*",
-        color=0x00cc66,
-        timestamp=datetime.datetime.utcnow()
-    )
-    embed.set_footer(text="/cravingkiller — run it every time you want to light up")
+    embed.set_footer(text="/smoke — hit it again for another random take")
     await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -919,10 +816,9 @@ async def cmd_help(interaction: discord.Interaction):
     embed = discord.Embed(title="📖 Commands", color=0x5865F2, timestamp=datetime.datetime.utcnow())
     sections = {
         "💰 Crypto":     ["/price", "/chart", "/top", "/compare", "/trending", "/fomo", "/coins"],
-        "🥇 Commodities":["/commodity  (gold · silver · oil · gas · platinum · palladium · copper · wheat · corn)"],
+        "🥇 Commodities":["/commodity  (gold · silver · oil · gas · copper · wheat · corn · coffee · sugar · cocoa · cotton · lumber · oj · cattle · hogs · feeder · milk)"],
         "🎵 Music":      ["/play", "/skip", "/stop", "/queue", "/nowplaying"],
-        "🚬 Smoking":    ["/smoke  (facts·funny·quit·timeline·rules·brand·random)",
-                          "/smokebreak", "/dailysmokes", "/quittrack", "/quitstats", "/cravingkiller"],
+        "🚬 Smoking":    ["/smoke  (random facts · jokes · rules · brand roasts)"],
         "⚙️ Admin":      ["/setcmdchannel", "/setcmdrole", "/clearcmdrestrictions", "/settings"],
     }
     for sec,cmds in sections.items():
@@ -933,7 +829,7 @@ async def cmd_help(interaction: discord.Interaction):
 @tree.command(name="ping", description="Bot latency")
 async def cmd_ping(interaction: discord.Interaction):
     ms    = round(bot.latency*1000)
-    color = 0x00ff88 if ms<100 else 0xffaa00 if ms<200 else 0xff4444
+    color = 0x00ff88 if ms<<100 else 0xffaa00 if ms<<200 else 0xff4444
     embed = discord.Embed(title="🏓 Pong", description=f"**{ms}ms**", color=color)
     await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
 
