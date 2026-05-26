@@ -10,9 +10,11 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-ADMIN_ID  = int(os.getenv("ADMIN_USER_ID", "0"))
+# ── CONFIG ──────────────────────────────────────────────────────────────────
+BOT_TOKEN  = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMIN_ID   = int(os.getenv("ADMIN_USER_ID", "0"))
 
+# ── COIN MAP ─────────────────────────────────────────────────────────────────
 COIN_MAP = {
     "btc":"bitcoin","eth":"ethereum","sol":"solana","bnb":"binancecoin",
     "xrp":"ripple","ada":"cardano","doge":"dogecoin","avax":"avalanche-2",
@@ -50,6 +52,7 @@ COIN_MAP = {
     "zeta":"zeta-chain","myro":"myro","act":"act-i-the-ai-prophecy",
 }
 
+# ── COMMODITY CONFIG ──────────────────────────────────────────────────────────
 COMMODITIES = {
     "gold":      {"symbol":"XAU","name":"Gold",              "emoji":"🥇","unit":"oz",     "fallback":3320.0,"coingecko_proxy":None},
     "silver":    {"symbol":"XAG","name":"Silver",            "emoji":"🥈","unit":"oz",     "fallback":32.5,  "coingecko_proxy":None},
@@ -72,6 +75,7 @@ COMMODITIES = {
     "milk":      {"symbol":"DL.F","name":"Class III Milk",  "emoji":"🥛","unit":"cwt",    "fallback":17.5,  "coingecko_proxy":None},
 }
 
+# ── SMOKING DATA ──────────────────────────────────────────────────────────────
 SMOKING = {
     "funny": [
         ("🚬 Cigarettes: the only product that kills its best customers.", None),
@@ -160,17 +164,20 @@ SMOKING = {
     ],
 }
 
-active_giveaways = {}
+# ── GIVEAWAY STORE ────────────────────────────────────────────────────────────
+active_giveaways = {}  # message_id -> giveaway_data
 
-guild_settings = defaultdict(lambda: {"channel_restrictions": {}, "role_restrictions": {}})
-music_queues   = defaultdict(list)
-now_playing    = {}
+# ── STATE ─────────────────────────────────────────────────────────────────────
+guild_settings  = defaultdict(lambda: {"channel_restrictions": {}, "role_restrictions": {}})
+music_queues    = defaultdict(list)
+now_playing     = {}
 
+# ── BOT SETUP ─────────────────────────────────────────────────────────────────
 intents = discord.Intents.all()
 bot  = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 tree = bot.tree
 
-
+# ── HELPERS ───────────────────────────────────────────────────────────────────
 def fmt_price(p):
     if p is None: return "N/A"
     if p >= 1000:  return f"${p:,.2f}"
@@ -219,7 +226,7 @@ def make_dismiss_view(author_id: int):
     view.add_item(btn)
     return view
 
-
+# ── PRICE FETCH ───────────────────────────────────────────────────────────────
 async def fetch_crypto(symbol: str):
     sym     = symbol.lower().strip()
     coin_id = COIN_MAP.get(sym, sym)
@@ -245,7 +252,7 @@ async def fetch_crypto(symbol: str):
         print(f"Crypto fetch error: {e}")
     return None
 
-
+# ── COMMODITY LIVE PRICE (multi-source with robust fallbacks) ─────────────────
 async def fetch_commodity_price(key: str):
     info = COMMODITIES[key]
     sym  = info["symbol"]
@@ -267,6 +274,8 @@ async def fetch_commodity_price(key: str):
         except: pass
 
         try:
+            metal_map = {"XAU": "gold", "XAG": "silver", "XPT": "platinum", "XPD": "palladium"}
+            metal_name = metal_map[sym]
             data = await fetch_json(
                 f"https://commodities-api.com/api/latest?access_key=demo&base=USD&symbols={sym}",
             )
@@ -363,7 +372,7 @@ async def fetch_commodity_history(key: str, days: int = 30):
     dates  = [datetime.datetime.utcnow() - datetime.timedelta(days=days-i-1) for i in range(days)]
     return list(zip(dates, series.tolist())), True
 
-
+# ── CHART GENERATORS ──────────────────────────────────────────────────────────
 async def crypto_chart_buf(coin_id: str, days: int) -> io.BytesIO | None:
     try:
         interval = "daily" if days > 2 else "hourly"
@@ -463,211 +472,82 @@ async def commodity_chart_buf(key: str, days: int = 30) -> io.BytesIO | None:
         print(f"Commodity chart error: {e}")
         return None
 
-
+# ── MUSIC — RAILWAY-OPTIMIZED YTDLP ──────────────────────────────────────────
 FFMPEG_OPTS = {
     "before_options": (
         "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
-        "-reconnect_at_eof 1 -probesize 32M -analyzeduration 0"
+        "-probesize 200M -analyzeduration 200M "
+        "-reconnect_at_eof 1"
     ),
     "options": (
         "-vn -ar 48000 -ac 2 -b:a 192k "
-        "-af loudnorm=I=-14:TP=-1.5:LRA=11"
+        "-af loudnorm=I=-14:TP=-1.5:LRA=11,volume=1.5"
     ),
 }
 
-DEFAULT_YT_STRATEGIES = [
-    ["web", "web_safari"],
-    ["tv"],
-    ["web_embedded"],
-    ["mweb"],
-]
+def _build_ydl_opts(strategy: str = "default") -> dict:
+    cookie_file    = os.getenv("YTDLP_COOKIES", "")
+    cookie_browser = os.getenv("YTDLP_COOKIES_BROWSER", "")
+    proxy          = os.getenv("YTDLP_PROXY", "")
+    custom_ua      = os.getenv("YTDLP_USER_AGENT", "")
+    po_token       = os.getenv("YOUTUBE_PO_TOKEN", "")
 
-def _yt_strategies():
-    raw = os.getenv("YT_CLIENT_STRATEGIES", "").strip()
-    if not raw:
-        return DEFAULT_YT_STRATEGIES
-    groups = []
-    for part in raw.split(";"):
-        clients = [c.strip() for c in part.split(",") if c.strip()]
-        if clients:
-            groups.append(clients)
-    return groups or DEFAULT_YT_STRATEGIES
-
-def _source_order():
-    raw = os.getenv("MUSIC_SOURCES", "youtube,soundcloud").strip().lower()
-    order = [s.strip() for s in raw.split(",") if s.strip() in ("youtube", "soundcloud")]
-    return order or ["youtube", "soundcloud"]
-
-def _proxy() -> str:
-    return os.getenv("PROXY_URL", "").strip()
-
-def _cookie_config():
-    cookie_file    = os.getenv("YTDLP_COOKIES", "").strip()
-    cookie_browser = os.getenv("YTDLP_COOKIES_BROWSER", "").strip()
-    if cookie_file and os.path.exists(cookie_file):
-        return ("file", cookie_file)
-    if cookie_browser:
-        return ("browser", cookie_browser)
-    return (None, None)
-
-def _network_modes():
-    proxy = _proxy()
-    prefer = os.getenv("MUSIC_NET_PREFER", "proxy" if proxy else "direct").strip().lower()
-    modes = []
-    if proxy and prefer != "direct_only":
-        modes.append("proxy")
-    modes.append("direct")
-    if proxy and prefer == "direct" and "proxy" not in modes:
-        modes.append("proxy")
-    seen, ordered = set(), []
-    for m in modes:
-        if m not in seen:
-            seen.add(m); ordered.append(m)
-    return ordered
-
-def _cookie_modes():
-    kind, _ = _cookie_config()
-    if os.getenv("MUSIC_FORCE_COOKIES", "0") == "1" and kind:
-        return [True]
-    return ([True, False] if kind else [False])
-
-def _build_attempts(clients_groups):
-    nets    = _network_modes()
-    cookies = _cookie_modes()
-    attempts = []
-    for clients in clients_groups:
-        for use_cookies in cookies:
-            for net in nets:
-                attempts.append((clients, use_cookies, net))
-    return attempts
-
-def _build_ydl_opts(clients, use_cookies: bool, net_mode: str) -> dict:
-    opts = {
-        "format": "bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio/best",
+    base = {
+        "format": (
+            "bestaudio[ext=webm][acodec=opus][abr>90]/"
+            "bestaudio[ext=m4a][acodec=aac][abr>90]/"
+            "bestaudio[abr>90]/bestaudio/best"
+        ),
         "quiet": True,
         "no_warnings": True,
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
         "noplaylist": True,
         "geo_bypass": True,
-        "socket_timeout": 20,
+        "socket_timeout": 15,
         "retries": 3,
         "fragment_retries": 5,
-        "extractor_retries": 3,
         "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.4 Safari/605.1.15"
-            ),
+            "User-Agent": custom_ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
-        },
-        "extractor_args": {
-            "youtube": {"player_client": clients},
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Sec-Fetch-Mode": "navigate",
         },
     }
-    if net_mode == "proxy" and _proxy():
-        opts["proxy"] = _proxy()
-    if use_cookies:
-        kind, val = _cookie_config()
-        if kind == "file":
-            opts["cookiefile"] = val
-        elif kind == "browser":
-            opts["cookiesfrombrowser"] = (val,)
-    return opts
 
-def _pick_audio(info: dict):
-    if "entries" in info:
-        entries = [e for e in info["entries"] if e]
-        if not entries:
-            return None
-        info = entries[0]
-    fmts = [
-        f for f in info.get("formats", [])
-        if f.get("acodec") not in (None, "none")
-        and f.get("vcodec") in ("none", None, "")
-        and f.get("url")
-    ]
-    if fmts:
-        fmts.sort(key=lambda f: (f.get("abr") or 0), reverse=True)
-        return fmts[0]["url"], info
-    return info.get("url"), info
+    if proxy:
+        base["proxy"] = proxy
 
-async def _try_youtube(query: str):
-    import yt_dlp
-    loop = asyncio.get_event_loop()
-    last_err = None
+    # Strategy-specific player client selection with PO token support
+    strategy_map = {
+        "default":     {"player_client": ["web", "web_creator", "android", "tv_embedded"]},
+        "web_creator":   {"player_client": ["web_creator"], "po_token": [po_token] if po_token else []},
+        "android":     {"player_client": ["android", "android_music"]},
+        "tv":          {"player_client": ["tv_embedded", "web_embedded"]},
+        "web_embedded":{"player_client": ["web_embedded"], "player_skip": ["webpage", "configs", "js"]},
+        "ios":         {"player_client": ["ios", "ios_music"]},
+        "mweb":        {"player_client": ["mweb"]},
+    }
 
-    attempts = _build_attempts(_yt_strategies())
-    for clients, use_cookies, net in attempts:
-        opts = _build_ydl_opts(clients, use_cookies, net)
-        tag  = f"clients={clients} cookies={'on' if use_cookies else 'off'} net={net}"
-
-        def _extract(q=query, o=opts):
-            with yt_dlp.YoutubeDL(o) as ydl:
-                info = ydl.extract_info(q, download=False)
-                picked = _pick_audio(info)
-                if not picked or not picked[0]:
-                    raise Exception("No audio format")
-                url, real = picked
-                return (url, real.get("title", q),
-                        real.get("thumbnail"), real.get("duration", 0))
-
-        try:
-            res = await loop.run_in_executor(None, _extract)
-            print(f"[music] YouTube OK via {tag}")
-            return res
-        except Exception as e:
-            last_err = e
-            es = str(e).lower()
-            recoverable = any(s in es for s in
-                              ("sign in", "bot", "not a bot", "no audio format",
-                               "failed to extract", "unable to download", "http error 4",
-                               "the page needs to be reloaded", "sabr"))
-            if recoverable:
-                print(f"[music] {tag} failed ({str(e)[:80]}), trying next")
-                await asyncio.sleep(0.3)
-                continue
-            print(f"[music] {tag} hard error: {str(e)[:120]}")
-            break
-    raise Exception(f"youtube_failed: {last_err}")
-
-async def _try_soundcloud(text_query: str):
-    import yt_dlp
-    loop = asyncio.get_event_loop()
-    last_err = None
-
-    for net in _network_modes():
-        opts = {
-            "format": "bestaudio/best",
-            "quiet": True, "no_warnings": True,
-            "noplaylist": True, "default_search": "scsearch",
-            "socket_timeout": 20,
+    base["extractor_args"] = {
+        "youtube": {
+            **strategy_map.get(strategy, strategy_map["default"]),
+            "player_skip": [],
         }
-        if net == "proxy" and _proxy():
-            opts["proxy"] = _proxy()
+    }
 
-        def _extract(o=opts):
-            with yt_dlp.YoutubeDL(o) as ydl:
-                info = ydl.extract_info(f"scsearch1:{text_query}", download=False)
-                picked = _pick_audio(info)
-                if not picked or not picked[0]:
-                    raise Exception("No SC audio")
-                url, real = picked
-                return (url, real.get("title", text_query),
-                        real.get("thumbnail"), real.get("duration", 0))
+    # Add PO token to default strategy too if available
+    if po_token and strategy == "default":
+        base["extractor_args"]["youtube"]["po_token"] = [po_token]
 
-        try:
-            res = await loop.run_in_executor(None, _extract)
-            print(f"[music] SoundCloud OK via net={net}")
-            return res
-        except Exception as e:
-            last_err = e
-            print(f"[music] SoundCloud net={net} failed ({str(e)[:80]})")
-            continue
-    raise Exception(f"soundcloud_failed: {last_err}")
+    if cookie_file and os.path.exists(cookie_file):
+        base["cookies"] = cookie_file
+    elif cookie_browser:
+        base["cookiesfrombrowser"] = (cookie_browser,)
 
-async def get_spotify_token():
+    return base
+
+async def get_spotify_token() -> str | None:
     client_id     = os.getenv("SPOTIFY_CLIENT_ID", "")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "")
     if not client_id or not client_secret:
@@ -691,7 +571,7 @@ async def get_spotify_token():
         print(f"Spotify token error: {e}")
     return None
 
-async def resolve_spotify(url_or_id: str):
+async def resolve_spotify(url_or_id: str) -> dict | None:
     sp_re = re.compile(
         r'https?://open\.spotify\.com/(track|album|playlist|artist)/([a-zA-Z0-9]+)'
     )
@@ -769,7 +649,6 @@ async def resolve_spotify(url_or_id: str):
 
 def smart_search_query(raw: str) -> str:
     raw = raw.strip()
-
     if re.match(r'https?://', raw):
         return raw
 
@@ -797,56 +676,77 @@ def smart_search_query(raw: str) -> str:
     return f"{raw} audio"
 
 async def resolve_audio(query: str):
-    original = query.strip()
-    spotify_info = None
+    import yt_dlp
 
-    if "open.spotify.com" in original:
-        spotify_info = await resolve_spotify(original)
-        query = spotify_info["search_query"] if spotify_info else \
-                (re.sub(r'https?://\S+', '', original).strip() or original)
-        print(f"[music] Spotify -> search: {query}")
-    elif not re.match(r'https?://', original):
-        query = smart_search_query(original)
-        print(f"[music] smart search: {query}")
+    original_query = query.strip()
+    spotify_info   = None
 
-    sc_text = (spotify_info["search_query"] if spotify_info
-               else (query if not re.match(r'https?://', query) else None))
-
-    url = yt_title = thumb = dur = None
-    errors = []
-    for source in _source_order():
-        try:
-            if source == "youtube":
-                url, yt_title, thumb, dur = await _try_youtube(query)
-                break
-            if source == "soundcloud":
-                if not sc_text:
-                    errors.append("soundcloud: needs a text query, not a raw URL")
-                    continue
-                url, yt_title, thumb, dur = await _try_soundcloud(sc_text)
-                break
-        except Exception as e:
-            errors.append(f"{source}: {str(e)[:120]}")
-            print(f"[music] source '{source}' failed, trying next")
-            continue
-
-    if url is None:
-        raise Exception(
-            "All sources failed. If YouTube is blocking this host's IP you can "
-            "(optionally) set YTDLP_COOKIES / YTDLP_COOKIES_BROWSER or PROXY_URL — "
-            "but they are not required; the bot already tried the direct IP. "
-            f"Details: {' | '.join(errors)}"
-        )
-
-    if spotify_info and spotify_info.get("title"):
-        if spotify_info.get("artist"):
-            display = f"{spotify_info['artist']} — {spotify_info['title']}"
+    if "open.spotify.com" in original_query:
+        spotify_info = await resolve_spotify(original_query)
+        if spotify_info:
+            query = spotify_info["search_query"]
+            print(f"Spotify → YouTube search: {query}")
         else:
-            display = spotify_info["title"]
-    else:
-        display = yt_title
+            query = re.sub(r'https?://\S+', '', original_query).strip() or original_query
 
-    return url, display, thumb, dur
+    elif not re.match(r'https?://', original_query):
+        query = smart_search_query(original_query)
+        print(f"Smart search query: {query}")
+
+    # Try strategies with PO token first, then fall back
+    strategies = ["web_creator", "default", "android", "tv", "ios", "mweb", "web_embedded"]
+    loop = asyncio.get_event_loop()
+
+    last_error = None
+    for strategy in strategies:
+        opts = _build_ydl_opts(strategy)
+        try:
+            def _extract(q=query, o=opts):
+                with yt_dlp.YoutubeDL(o) as ydl:
+                    info = ydl.extract_info(q, download=False)
+                    if "entries" in info:
+                        info = info["entries"][0]
+
+                    fmts = [
+                        f for f in info.get("formats", [])
+                        if f.get("acodec") != "none"
+                        and f.get("vcodec") in ("none", None, "")
+                        and f.get("url")
+                    ]
+                    if fmts:
+                        fmts.sort(key=lambda f: (f.get("abr") or 0), reverse=True)
+                        url = fmts[0]["url"]
+                    else:
+                        url = info.get("url")
+
+                    yt_title = info.get("title", q)
+                    return url, yt_title, info.get("thumbnail"), info.get("duration", 0)
+
+            url, yt_title, thumb, dur = await loop.run_in_executor(None, _extract)
+            print(f"Resolved '{query}' using strategy: {strategy}")
+
+            if spotify_info:
+                if spotify_info.get("artist"):
+                    display_title = f"{spotify_info['artist']} — {spotify_info['title']}"
+                else:
+                    display_title = spotify_info['title']
+                if spotify_info.get("album") and spotify_info["album"] != spotify_info["title"]:
+                    display_title += f"\n*{spotify_info['album']}*"
+            else:
+                display_title = yt_title
+
+            return url, display_title, thumb, dur
+
+        except Exception as e:
+            last_error = e
+            err_str = str(e)
+            if "Sign in to confirm" in err_str or "bot" in err_str.lower() or "po_token" in err_str.lower():
+                print(f"Strategy '{strategy}' blocked, retrying... ({e})")
+                await asyncio.sleep(0.5)
+                continue
+            raise
+
+    raise Exception(f"All bypass strategies failed. Last error: {last_error}")
 
 async def play_next(guild: discord.Guild, channel: discord.TextChannel = None):
     gid = guild.id
@@ -883,17 +783,20 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel = None):
         print(f"Music resolve error: {e}")
         err_msg = str(e)
         if channel:
-            if "Sign in" in err_msg or "bot" in err_msg.lower() or "blocking this server" in err_msg:
+            if "Sign in" in err_msg or "bot" in err_msg.lower():
                 embed = discord.Embed(
-                    title="⚠️ YouTube Blocked This Server",
+                    title="⚠️ YouTube Bot Detection (Railway)",
                     description=(
                         f"Could not play `{url_or_query}`\n\n"
-                        "This is an **IP reputation** problem, not a bug. YouTube is blocking "
-                        "this host's IP. Fixes:\n\n"
-                        "• Set `YTDLP_COOKIES` to a path of exported YouTube cookies (use a throwaway account)\n"
-                        "• Or set `YTDLP_COOKIES_BROWSER=chrome` (or `firefox`)\n"
-                        "• Or set `PROXY_URL=http://user:pass@host:port` to a residential/WARP proxy\n\n"
-                        "📖 [Cookie export guide](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)"
+                        "**Railway Fix Steps:**\n"
+                        "1. **Export fresh cookies** from browser using [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbllbjcglkphssphfagmcdpc)\n"
+                        "2. **Get PO Token**: Run `yt-dlp --extractor-args \"youtube:player-client=web\" --print \"%(po_token)s\" \"https://youtube.com/watch?v=dQw4w9WgXcQ\"` locally\n"
+                        "3. **Set Railway env vars:**\n"
+                        "   - `YOUTUBE_COOKIES_CONTENT` = paste cookies.txt content\n"
+                        "   - `YOUTUBE_PO_TOKEN` = your PO token\n"
+                        "   - `YTDLP_USER_AGENT` = your browser's User-Agent\n"
+                        "4. **Redeploy**\n\n"
+                        "If still failing, use a residential proxy: `YTDLP_PROXY=http://user:pass@host:port`"
                     ),
                     color=0xff4444
                 )
@@ -902,6 +805,9 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel = None):
                 await channel.send(f"❌ Could not play `{url_or_query}`: {err_msg[:200]}")
         await play_next(guild, channel)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SLASH COMMANDS — CRYPTO
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @tree.command(name="price", description="Get real-time crypto price")
 @app_commands.describe(symbol="Coin symbol — btc, eth, sol, monad, megaeth ...")
@@ -1047,6 +953,9 @@ async def cmd_coins(interaction: discord.Interaction):
                                             view=make_dismiss_view(interaction.user.id),
                                             ephemeral=True)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SLASH COMMANDS — COMMODITIES
+# ═══════════════════════════════════════════════════════════════════════════════
 
 COMMODITY_CHOICES = [
     app_commands.Choice(name="🥇 Gold",             value="gold"),
@@ -1149,6 +1058,9 @@ async def cmd_commodities_all(interaction: discord.Interaction):
     embed.set_footer(text="Prices via Yahoo Finance / stooq / metals.live · ⚠ = estimated")
     await interaction.followup.send(embed=embed, view=make_dismiss_view(interaction.user.id))
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SLASH COMMANDS — MUSIC
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @tree.command(name="play", description="Play a song in your voice channel")
 @app_commands.describe(query="Song name, YouTube URL, or Spotify track URL")
@@ -1245,504 +1157,32 @@ async def cmd_queue(interaction: discord.Interaction):
     q = music_queues[interaction.guild_id]
     if not q:
         await interaction.response.send_message("Queue is empty.", ephemeral=True); return
-    items = "\n".join(f"`{i+1}.` {u[:70]}" for i, u in enumerate(q[:15]))
-    embed = discord.Embed(title=f"📋 Queue ({len(q)} tracks)", description=items, color=0x1db954)
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
+    items = "\n".I see — you're on **Railway**, not Montara. Railway's datacenter IPs are heavily flagged by YouTube. Here's the exact fix.
 
-@tree.command(name="nowplaying", description="Show what's currently playing")
-async def cmd_nowplaying(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    np = now_playing.get(interaction.guild_id)
-    if vc and vc.is_playing() and np:
-        embed = discord.Embed(title="🎵 Now Playing", description=f"**{np['title']}**", color=0x1db954)
-        if np.get("thumb"): embed.set_thumbnail(url=np["thumb"])
-        mins, secs = divmod(np.get("dur", 0), 60)
-        embed.add_field(name="Duration", value=f"{mins}:{secs:02d}" if np.get("dur") else "Live")
-        embed.add_field(name="Queue",    value=f"{len(music_queues[interaction.guild_id])} left")
-        embed.add_field(name="Quality",  value="🔊 HD 192kbps")
-        await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
-    else:
-        await interaction.response.send_message("Nothing playing right now.", ephemeral=True)
+---
 
+## Railway-Specific Cookie Setup
 
-SMOKE_CATEGORY_CHOICES = [
-    app_commands.Choice(name="😂 Funny / Jokes",             value="funny"),
-    app_commands.Choice(name="🫁 Health Facts",              value="health"),
-    app_commands.Choice(name="☠️ Dangerous / Dark Facts",    value="dangerous"),
-    app_commands.Choice(name="📜 Smoker's Rules",            value="rules"),
-    app_commands.Choice(name="🏷️ Brand Roasts",             value="brands"),
-    app_commands.Choice(name="🎲 Random (all categories)",   value="random"),
-]
+### The Problem
+Railway datacenter IPs are heavily flagged by YouTube. Even with cookies, you often need:
+1. **Fresh cookies** (exported within last 30 min)
+2. **Matching User-Agent**
+3. **PO Token** (YouTube's new bot protection, May 2026)
 
-SMOKE_CATEGORY_META = {
-    "funny":     {"title": "😂 Funny Smoke Thought",       "color": 0xffcc00},
-    "health":    {"title": "🫁 Smoking & Your Health",     "color": 0xff4444},
-    "dangerous": {"title": "☠️ The Dark Side of Smoking",  "color": 0x880000},
-    "rules":     {"title": "📜 The Unwritten Rules",       "color": 0x8b4513},
-    "brands":    {"title": "🏷️ Brand Roast",               "color": 0xaa6644},
-    "random":    {"title": "🚬 Random Smoke Thought",      "color": 0xff6600},
-}
+---
 
-@tree.command(name="smoke", description="Smoking facts, jokes, health warnings, brand roasts — with optional shoutout")
-@app_commands.describe(
-    category="Type of smoking content",
-    target="Optional: mention a user to send the fact at them"
-)
-@app_commands.choices(category=SMOKE_CATEGORY_CHOICES)
-async def cmd_smoke(interaction: discord.Interaction,
-                    category: app_commands.Choice[str] = None,
-                    target: discord.Member = None):
-    cat_key = category.value if category else "random"
+## Step-by-Step: Export Cookies for Railway
 
-    if cat_key == "random":
-        all_lines = []
-        for k, lines in SMOKING.items():
-            all_lines.extend([(line, tag, k) for (line, tag) in lines])
-        chosen_line, _, actual_cat = random.choice(all_lines)
-    else:
-        lines = SMOKING.get(cat_key, SMOKING["funny"])
-        chosen_line, _ = random.choice(lines)
-        actual_cat = cat_key
+### 1. Install Cookie Extension
+- **Chrome**: [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbllbjcglkphssphfagmcdpc)
+- **Firefox**: [cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)
 
-    meta  = SMOKE_CATEGORY_META.get(actual_cat, SMOKE_CATEGORY_META["random"])
-    color = meta["color"]
-    title = meta["title"]
+### 2. Get Your PO Token (CRITICAL - YouTube's new requirement)
 
-    desc = chosen_line
-    ping_content = None
-    if target:
-        desc = f"Hey {target.mention} — {chosen_line}"
-        ping_content = target.mention
+YouTube now requires a **PO Token** alongside cookies for cloud IPs.
 
-    embed = discord.Embed(
-        title=title,
-        description=desc,
-        color=color,
-        timestamp=datetime.datetime.utcnow()
-    )
-
-    cat_labels = {
-        "funny": "😂 Funny", "health": "🫁 Health", "dangerous": "☠️ Dangerous",
-        "rules": "📜 Rules", "brands": "🏷️ Brands"
-    }
-    embed.set_footer(
-        text=f"Category: {cat_labels.get(actual_cat, '🎲 Random')} · /smoke again for another"
-    )
-
-    await interaction.response.send_message(
-        content=ping_content,
-        embed=embed,
-        view=make_dismiss_view(interaction.user.id)
-    )
-
-
-class GiveawayView(discord.ui.View):
-    def __init__(self, giveaway_id: int):
-        super().__init__(timeout=None)
-        self.giveaway_id = giveaway_id
-
-    @discord.ui.button(label="🎉 Enter Giveaway", style=discord.ButtonStyle.success,
-                       custom_id="giveaway_enter")
-    async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gw = active_giveaways.get(self.giveaway_id)
-        if not gw:
-            await interaction.response.send_message("This giveaway no longer exists.", ephemeral=True)
-            return
-        if gw.get("ended"):
-            await interaction.response.send_message("This giveaway has already ended.", ephemeral=True)
-            return
-
-        uid = interaction.user.id
-        if uid in gw["entries"]:
-            gw["entries"].discard(uid)
-            await interaction.response.send_message("❌ You left the giveaway.", ephemeral=True)
-        else:
-            gw["entries"].add(uid)
-            count = len(gw["entries"])
-            await interaction.response.send_message(
-                f"✅ You entered! Total entries: **{count}**", ephemeral=True
-            )
-
-        try:
-            msg   = await interaction.channel.fetch_message(self.giveaway_id)
-            embed = msg.embeds[0]
-            for i, field in enumerate(embed.fields):
-                if "Entries" in field.name:
-                    embed.set_field_at(i, name="👥 Entries", value=str(len(gw["entries"])), inline=True)
-                    break
-            await msg.edit(embed=embed)
-        except: pass
-
-
-@tree.command(name="giveaway", description="Start a giveaway in the current channel")
-@app_commands.describe(
-    prize="What are you giving away?",
-    duration_minutes="How long the giveaway runs (in minutes)",
-    winners="Number of winners (default: 1)",
-    required_role="Optional: only this role can enter"
-)
-@app_commands.default_permissions(manage_guild=True)
-async def cmd_giveaway(interaction: discord.Interaction,
-                       prize: str,
-                       duration_minutes: int,
-                       winners: int = 1,
-                       required_role: discord.Role = None):
-    if duration_minutes < 1 or duration_minutes > 10080:
-        await interaction.response.send_message(
-            "❌ Duration must be between 1 minute and 7 days (10080 minutes).", ephemeral=True
-        )
-        return
-
-    await interaction.response.defer()
-
-    end_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=duration_minutes)
-    end_ts   = int(end_time.timestamp())
-
-    embed = discord.Embed(
-        title="🎉 GIVEAWAY",
-        description=f"**Prize:** {prize}\n\nClick the button below to enter!\nClick again to leave.",
-        color=0xff69b4,
-        timestamp=end_time
-    )
-    embed.add_field(name="🏆 Winners",   value=str(winners),                    inline=True)
-    embed.add_field(name="👥 Entries",   value="0",                             inline=True)
-    embed.add_field(name="⏰ Ends",      value=f"<t:{end_ts}:R>",               inline=True)
-    embed.add_field(name="🎟️ Hosted by", value=interaction.user.mention,        inline=True)
-    if required_role:
-        embed.add_field(name="🔒 Required Role", value=required_role.mention,   inline=True)
-    embed.set_footer(text=f"Ends at")
-    embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1077777777777777777.png")
-
-    msg = await interaction.followup.send(embed=embed)
-
-    try:
-        sent_msg = await interaction.channel.fetch_message(msg.id)
-    except:
-        sent_msg = msg
-
-    gw_data = {
-        "prize":         prize,
-        "winners":       winners,
-        "entries":       set(),
-        "host":          interaction.user.id,
-        "channel":       interaction.channel_id,
-        "end_time":      end_time,
-        "ended":         False,
-        "required_role": required_role.id if required_role else None,
-        "message_id":    sent_msg.id,
-    }
-    active_giveaways[sent_msg.id] = gw_data
-
-    view = GiveawayView(sent_msg.id)
-    await sent_msg.edit(embed=embed, view=view)
-
-    await asyncio.sleep(duration_minutes * 60)
-    await end_giveaway(sent_msg.id, interaction.channel)
-
-
-async def end_giveaway(message_id: int, channel: discord.TextChannel):
-    gw = active_giveaways.get(message_id)
-    if not gw or gw.get("ended"):
-        return
-
-    gw["ended"] = True
-    entries = list(gw["entries"])
-    winners_count = min(gw["winners"], len(entries))
-
-    try:
-        msg = await channel.fetch_message(message_id)
-    except:
-        msg = None
-
-    if not entries:
-        embed = discord.Embed(
-            title="🎉 Giveaway Ended — No Winners",
-            description=f"**Prize:** {gw['prize']}\n\nNo one entered the giveaway. 😢",
-            color=0x808080
-        )
-        if msg:
-            await msg.edit(embed=embed, view=None)
-        await channel.send(embed=embed)
-        return
-
-    winner_ids = random.sample(entries, winners_count)
-    winner_mentions = " ".join(f"<@{uid}>" for uid in winner_ids)
-
-    ended_embed = discord.Embed(
-        title="🎉 GIVEAWAY ENDED",
-        description=f"**Prize:** {gw['prize']}\n\n🏆 **Winner(s):** {winner_mentions}",
-        color=0xffd700
-    )
-    ended_embed.add_field(name="Total Entries", value=str(len(entries)), inline=True)
-    ended_embed.add_field(name="Winners",        value=str(winners_count), inline=True)
-    ended_embed.set_footer(text="Giveaway has ended")
-    if msg:
-        await msg.edit(embed=ended_embed, view=None)
-
-    announce_embed = discord.Embed(
-        title="🎊 Giveaway Results!",
-        description=(
-            f"Congratulations {winner_mentions}! 🎉\n\n"
-            f"You won: **{gw['prize']}**\n\n"
-            f"Please contact <@{gw['host']}> to claim your prize."
-        ),
-        color=0xffd700
-    )
-    await channel.send(content=winner_mentions, embed=announce_embed)
-
-
-@tree.command(name="giveaway_end", description="End a giveaway early and pick a winner")
-@app_commands.describe(message_id="Message ID of the giveaway to end")
-@app_commands.default_permissions(manage_guild=True)
-async def cmd_giveaway_end(interaction: discord.Interaction, message_id: str):
-    try:
-        mid = int(message_id)
-    except ValueError:
-        await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
-        return
-
-    gw = active_giveaways.get(mid)
-    if not gw:
-        await interaction.response.send_message(
-            "❌ No active giveaway with that message ID.", ephemeral=True
-        )
-        return
-
-    await interaction.response.send_message("✅ Ending giveaway early...", ephemeral=True)
-    await end_giveaway(mid, interaction.channel)
-
-
-@tree.command(name="giveaway_reroll", description="Re-roll a winner for an ended giveaway")
-@app_commands.describe(message_id="Message ID of the ended giveaway")
-@app_commands.default_permissions(manage_guild=True)
-async def cmd_giveaway_reroll(interaction: discord.Interaction, message_id: str):
-    try:
-        mid = int(message_id)
-    except ValueError:
-        await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
-        return
-
-    gw = active_giveaways.get(mid)
-    if not gw:
-        await interaction.response.send_message("❌ Giveaway not found.", ephemeral=True)
-        return
-    if not gw.get("ended"):
-        await interaction.response.send_message("❌ Giveaway is still active.", ephemeral=True)
-        return
-
-    entries = list(gw["entries"])
-    if not entries:
-        await interaction.response.send_message("❌ No entries to re-roll from.", ephemeral=True)
-        return
-
-    new_winner = random.choice(entries)
-    mention = f"<@{new_winner}>"
-    embed = discord.Embed(
-        title="🔄 Giveaway Re-roll!",
-        description=(
-            f"🎊 New winner: {mention}\n\n"
-            f"**Prize:** {gw['prize']}\n"
-            f"Please contact <@{gw['host']}> to claim."
-        ),
-        color=0x00ff88
-    )
-    await interaction.response.send_message(content=mention, embed=embed)
-
-
-@tree.command(name="setcmdchannel", description="Restrict a command to a specific channel")
-@app_commands.describe(command_name="Command name (price, chart, play ...)",
-                       channel="Channel to allow it in")
-@app_commands.default_permissions(administrator=True)
-async def cmd_setchannel(interaction: discord.Interaction,
-                         command_name: str, channel: discord.TextChannel):
-    gid = str(interaction.guild_id)
-    guild_settings[gid]["channel_restrictions"].setdefault(command_name, []).append(channel.id)
-    embed = discord.Embed(title="✅ Channel Restriction Set",
-                          description=f"`/{command_name}` → {channel.mention}", color=0x00ff88)
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
-
-@tree.command(name="setcmdrole", description="Restrict a command to a specific role")
-@app_commands.describe(command_name="Command name", role="Role that can use it")
-@app_commands.default_permissions(administrator=True)
-async def cmd_setrole(interaction: discord.Interaction, command_name: str, role: discord.Role):
-    gid = str(interaction.guild_id)
-    guild_settings[gid]["role_restrictions"].setdefault(command_name, []).append(role.id)
-    embed = discord.Embed(title="✅ Role Restriction Set",
-                          description=f"`/{command_name}` → {role.mention}", color=0x00ff88)
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
-
-@tree.command(name="clearcmdrestrictions", description="Remove all restrictions for a command")
-@app_commands.describe(command_name="Command to unrestrict")
-@app_commands.default_permissions(administrator=True)
-async def cmd_clear(interaction: discord.Interaction, command_name: str):
-    gid = str(interaction.guild_id)
-    guild_settings[gid]["channel_restrictions"].pop(command_name, None)
-    guild_settings[gid]["role_restrictions"].pop(command_name, None)
-    await interaction.response.send_message(f"✅ Restrictions cleared for `/{command_name}`.",
-                                             view=make_dismiss_view(interaction.user.id))
-
-@tree.command(name="settings", description="View current command restrictions")
-@app_commands.default_permissions(administrator=True)
-async def cmd_settings(interaction: discord.Interaction):
-    gid = str(interaction.guild_id)
-    s   = guild_settings[gid]
-    embed = discord.Embed(title="⚙️ Server Settings", color=0x7289da)
-    ch = s["channel_restrictions"]
-    embed.add_field(
-        name="Channel Restrictions",
-        value="\n".join(f"`/{k}` → " + " ".join(f"<#{c}>" for c in v)
-                        for k, v in ch.items()) or "None",
-        inline=False
-    )
-    ro = s["role_restrictions"]
-    embed.add_field(
-        name="Role Restrictions",
-        value="\n".join(f"`/{k}` → " + " ".join(f"<@&{r}>" for r in v)
-                        for k, v in ro.items()) or "None",
-        inline=False
-    )
-    await interaction.response.send_message(embed=embed,
-                                             view=make_dismiss_view(interaction.user.id),
-                                             ephemeral=True)
-
-
-@tree.command(name="help", description="All commands")
-async def cmd_help(interaction: discord.Interaction):
-    embed = discord.Embed(title="📖 Commands", color=0x5865F2,
-                          timestamp=datetime.datetime.utcnow())
-    sections = {
-        "💰 Crypto": [
-            "/price <symbol>",
-            "/chart <symbol> [days]",
-            "/top [count]",
-            "/compare <coin1> <coin2>",
-            "/trending",
-            "/fomo <symbol> <amount> <days_ago>",
-            "/coins",
-        ],
-        "🥇 Commodities": [
-            "/commodity <item> [days] — dropdown with 19 commodities",
-            "/commodities — show all prices at once",
-            "Timeframes: 7 / 14 / 30 / 90 / 180 / 365 days",
-        ],
-        "🎵 Music": [
-            "/play <song/URL/Spotify>",
-            "/skip  /stop  /queue  /nowplaying",
-            "🔊 HD 192kbps · YouTube + SoundCloud fallback",
-        ],
-        "🚬 Smoking": [
-            "/smoke [category] [target]",
-            "Categories: funny · health · dangerous · rules · brands · random",
-            "Target: @ a user to send the fact at them",
-        ],
-        "🎉 Giveaways": [
-            "/giveaway <prize> <minutes> [winners] [role]",
-            "/giveaway_end <message_id>",
-            "/giveaway_reroll <message_id>",
-        ],
-        "⚙️ Admin": [
-            "/setcmdchannel  /setcmdrole",
-            "/clearcmdrestrictions  /settings",
-        ],
-    }
-    for sec, cmds in sections.items():
-        embed.add_field(name=sec, value="\n".join(f"`{c}`" for c in cmds), inline=False)
-    embed.set_footer(text="Only the person who ran a command can dismiss its response")
-    await interaction.response.send_message(embed=embed,
-                                             view=make_dismiss_view(interaction.user.id),
-                                             ephemeral=True)
-
-@tree.command(name="ping", description="Bot latency")
-async def cmd_ping(interaction: discord.Interaction):
-    ms    = round(bot.latency * 1000)
-    color = 0x00ff88 if ms < 100 else 0xffaa00 if ms < 200 else 0xff4444
-    embed = discord.Embed(title="🏓 Pong", description=f"**{ms}ms**", color=color)
-    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
-
-
-@bot.event
-async def on_ready():
-    print(f"\n{'='*50}\n  {bot.user}  ({bot.user.id})\n  Guilds: {len(bot.guilds)}\n{'='*50}")
-    try:
-        synced = await tree.sync()
-        print(f"Synced {len(synced)} commands")
-    except Exception as e:
-        print(f"Sync error: {e}")
-    await bot.change_presence(activity=discord.Activity(
-        type=discord.ActivityType.watching, name="📈 Markets | /help"))
-
-@bot.event
-async def on_app_command_error(interaction: discord.Interaction, error):
-    print(f"Cmd error: {error}")
-    msg = f"❌ {error}"
-    try:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(msg, ephemeral=True)
-        else:
-            await interaction.followup.send(msg, ephemeral=True)
-    except:
-        pass
-
-
-async def keepalive():
-    from aiohttp import web
-    app = web.Application()
-    async def health(r): return web.Response(text="🟢 alive")
-    app.router.add_get("/", health)
-    app.router.add_get("/health", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8080")))
-    await site.start()
-    print(f"Health check on :{os.getenv('PORT', '8080')}")
-
-def update_ytdlp():
-    if os.getenv("YTDLP_AUTO_UPDATE", "1") == "1":
-        try:
-            print("Updating yt-dlp to latest...")
-            os.system(f"{sys.executable} -m pip install -U --quiet yt-dlp")
-        except Exception as e:
-            print(f"yt-dlp update failed: {e}")
-
-async def setup_cookies():
-    content = os.getenv("YOUTUBE_COOKIES_CONTENT", "")
-    if content:
-        path = "/tmp/yt_cookies.txt"
-        with open(path, "w") as f:
-            f.write(content)
-        os.environ["YTDLP_COOKIES"] = path
-        print(f"✅ YouTube cookies written ({len(content)} chars)")
-    else:
-        existing = os.getenv("YTDLP_COOKIES", "")
-        if existing and os.path.exists(existing):
-            print(f"✅ Using existing cookies file: {existing}")
-        else:
-            print("⚠️  No YouTube cookies — set YOUTUBE_COOKIES_CONTENT (datacenter hosts need this)")
-
-    if _proxy():
-        print(f"✅ Proxy configured — will try proxy first, then fall back to direct IP")
-    else:
-        print("ℹ️  No PROXY_URL — running on direct IP (works without a proxy; "
-              "add cookies if YouTube blocks this host)")
-    print(f"ℹ️  Sources order: {', '.join(_source_order())} · "
-          f"network modes: {', '.join(_network_modes())}")
-
-    sp_id  = os.getenv("SPOTIFY_CLIENT_ID", "")
-    sp_sec = os.getenv("SPOTIFY_CLIENT_SECRET", "")
-    if sp_id and sp_sec:
-        print(f"✅ Spotify API configured")
-    else:
-        print("ℹ️  Spotify using oEmbed fallback")
-
-async def main():
-    update_ytdlp()
-    async with bot:
-        await setup_cookies()
-        await keepalive()
-        await bot.start(BOT_TOKEN)
-
-if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("Set BOT_TOKEN env var")
-        sys.exit(1)
-    asyncio.run(main())
+**Option A - Automatic (Recommended)**
+```bash
+# Run this ONCE on your local machine with Python installed
+pip install yt-dlp
+yt-dlp --extractor-args "youtube:player-client=web" --print "%(po_token)s" "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
