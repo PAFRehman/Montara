@@ -595,27 +595,57 @@ async def get_spotify_token() -> str | None:
 
 async def resolve_spotify(url_or_id: str) -> dict | None:
     """
-    Resolve a Spotify track/album/playlist URL to track info using the Spotify API.
-    Falls back to oEmbed if API credentials not set.
+    Resolve a Spotify track/album/playlist/artist URL to track info.
+    Uses oEmbed (NO credentials required) as primary path.
+    Optional Spotify API fallback if Client ID/Secret are configured.
     Returns dict with keys: title, artist, album, duration_ms, search_query
     """
     # ── Extract Spotify ID and type ───────────────────────────────────────
     sp_re = re.compile(
-        r'https?://open\.spotify\.com/(track|album|playlist)/([a-zA-Z0-9]+)'
+        r'https?://open\.spotify\.com/(track|album|playlist|artist)/([a-zA-Z0-9]+)'
     )
     m = sp_re.search(url_or_id)
     if not m:
         return None
 
-    sp_type = m.group(1)   # track / album / playlist
+    sp_type = m.group(1)   # track / album / playlist / artist
     sp_id   = m.group(2)
 
-    token = await get_spotify_token()
+    # ── 1. oEmbed: ZERO credentials needed ────────────────────────────────
+    try:
+        oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/{sp_type}/{sp_id}"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    data   = await r.json()
+                    title  = data.get("title", "")
+                    artist = data.get("author_name", "")
 
-    # ── Full Spotify API (best quality metadata) ──────────────────────────
-    if token:
-        headers = {"Authorization": f"Bearer {token}"}
+                    if sp_type == "track":
+                        search = f"{artist} - {title} official audio"
+                    elif sp_type == "album":
+                        search = f"{artist} {title} full album"
+                    elif sp_type == "playlist":
+                        search = f"{artist} {title} playlist"
+                    else:  # artist
+                        search = f"{artist} best songs"
+
+                    return {
+                        "title":        title,
+                        "artist":       artist,
+                        "album":        title if sp_type == "album" else "",
+                        "duration_ms":  0,
+                        "search_query": search,
+                        "source":       "oembed",
+                    }
+    except Exception as e:
+        print(f"Spotify oEmbed error: {e}")
+
+    # ── 2. Spotify API (optional, only if creds configured) ───────────────
+    token = await get_spotify_token()
+    if token and sp_type == "track":
         try:
+            headers = {"Authorization": f"Bearer {token}"}
             async with aiohttp.ClientSession() as s:
                 async with s.get(
                     f"https://api.spotify.com/v1/tracks/{sp_id}",
@@ -628,49 +658,30 @@ async def resolve_spotify(url_or_id: str) -> dict | None:
                         artists = ", ".join(a["name"] for a in d.get("artists", []))
                         album   = d.get("album", {}).get("name", "")
                         dur_ms  = d.get("duration_ms", 0)
-                        # Build the best possible YouTube search query
-                        search  = f"{artists} - {title} official audio"
                         return {
                             "title":        title,
                             "artist":       artists,
                             "album":        album,
                             "duration_ms":  dur_ms,
-                            "search_query": search,
+                            "search_query": f"{artists} - {title} official audio",
                             "source":       "spotify_api",
                         }
         except Exception as e:
             print(f"Spotify API track error: {e}")
 
-    # ── Fallback: oEmbed (no credentials needed) ─────────────────────────
-    try:
-        oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{sp_id}"
-        async with aiohttp.ClientSession() as s:
-            async with s.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
-                if r.status == 200:
-                    data    = await r.json()
-                    title   = data.get("title", "")
-                    artist  = data.get("author_name", "")
-                    search  = f"{artist} - {title} official audio"
-                    return {
-                        "title":        title,
-                        "artist":       artist,
-                        "album":        "",
-                        "duration_ms":  0,
-                        "search_query": search,
-                        "source":       "oembed",
-                    }
-    except Exception as e:
-        print(f"Spotify oEmbed error: {e}")
-
-    return None
+    # ── 3. Fallback ───────────────────────────────────────────────────────
+    return {
+        "title":        f"Spotify {sp_type}",
+        "artist":       "",
+        "album":        "",
+        "duration_ms":  0,
+        "search_query": f"spotify {sp_type} {sp_id}",
+        "source":       "fallback",
+    }
 
 def smart_search_query(raw: str) -> str:
     """
-    Convert a natural song search like:
-      'blinding lights weeknd'
-      'artist: weeknd song: blinding lights'
-      'weeknd - blinding lights'
-    into the best YouTube search query.
+    Convert a natural song search into the best YouTube search query.
     """
     raw = raw.strip()
 
@@ -708,7 +719,7 @@ def smart_search_query(raw: str) -> str:
 async def resolve_audio(query: str):
     """
     Resolve audio URL with:
-    - Smart Spotify resolution (API → oEmbed fallback)
+    - Smart Spotify resolution (oEmbed → optional API)
     - Smart song name/artist search
     - Multiple YouTube bypass strategies
     Tries: default → android → tv → ios → mweb
@@ -767,8 +778,11 @@ async def resolve_audio(query: str):
 
             # Use clean Spotify metadata for title if available
             if spotify_info:
-                display_title = f"{spotify_info['artist']} — {spotify_info['title']}"
-                if spotify_info.get("album"):
+                if spotify_info.get("artist"):
+                    display_title = f"{spotify_info['artist']} — {spotify_info['title']}"
+                else:
+                    display_title = spotify_info['title']
+                if spotify_info.get("album") and spotify_info["album"] != spotify_info["title"]:
                     display_title += f"\n*{spotify_info['album']}*"
             else:
                 display_title = yt_title
@@ -1259,8 +1273,10 @@ async def cmd_smoke(interaction: discord.Interaction,
     title = meta["title"]
 
     desc = chosen_line
+    ping_content = None
     if target:
         desc = f"Hey {target.mention} — {chosen_line}"
+        ping_content = target.mention  # ← Actually sends a notification
 
     embed = discord.Embed(
         title=title,
@@ -1278,6 +1294,7 @@ async def cmd_smoke(interaction: discord.Interaction,
     )
 
     await interaction.response.send_message(
+        content=ping_content,  # ← This is what actually pings the user
         embed=embed,
         view=make_dismiss_view(interaction.user.id)
     )
@@ -1435,7 +1452,7 @@ async def end_giveaway(message_id: int, channel: discord.TextChannel):
     if msg:
         await msg.edit(embed=ended_embed, view=None)
 
-    # Announce winners
+    # Announce winners — content= pings them, embed is the visual
     announce_embed = discord.Embed(
         title="🎊 Giveaway Results!",
         description=(
@@ -1445,7 +1462,7 @@ async def end_giveaway(message_id: int, channel: discord.TextChannel):
         ),
         color=0xffd700
     )
-    await channel.send(embed=announce_embed)
+    await channel.send(content=winner_mentions, embed=announce_embed)
 
 
 @tree.command(name="giveaway_end", description="End a giveaway early and pick a winner")
@@ -1493,16 +1510,17 @@ async def cmd_giveaway_reroll(interaction: discord.Interaction, message_id: str)
         return
 
     new_winner = random.choice(entries)
+    mention = f"<@{new_winner}>"
     embed = discord.Embed(
         title="🔄 Giveaway Re-roll!",
         description=(
-            f"🎊 New winner: <@{new_winner}>\n\n"
+            f"🎊 New winner: {mention}\n\n"
             f"**Prize:** {gw['prize']}\n"
             f"Please contact <@{gw['host']}> to claim."
         ),
         color=0x00ff88
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(content=mention, embed=embed)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SLASH COMMANDS — ADMIN
@@ -1664,18 +1682,7 @@ async def keepalive():
     await site.start()
     print(f"Health check on :{os.getenv('PORT', '8080')}")
 
-async def main():
-    async with bot:
-        await setup_cookies()
-        await keepalive()
-        await bot.start(BOT_TOKEN)
-
-if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("Set BOT_TOKEN env var")
-        sys.exit(1)
-    asyncio.run(main())
-
+# ── SETUP COOKIES (moved here so it exists before main() calls it) ────────────
 async def setup_cookies():
     content = os.getenv("YOUTUBE_COOKIES_CONTENT", "")
     if content:
@@ -1696,3 +1703,15 @@ async def setup_cookies():
         print(f"✅ Spotify API configured")
     else:
         print("ℹ️  Spotify using oEmbed fallback (set SPOTIFY_CLIENT_ID + SPOTIFY_CLIENT_SECRET for better results)")
+
+async def main():
+    async with bot:
+        await setup_cookies()
+        await keepalive()
+        await bot.start(BOT_TOKEN)
+
+if __name__ == "__main__":
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("Set BOT_TOKEN env var")
+        sys.exit(1)
+    asyncio.run(main())
