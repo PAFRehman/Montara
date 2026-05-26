@@ -564,37 +564,174 @@ def _build_ydl_opts(strategy: str = "default") -> dict:
 
     return base
 
+async def get_spotify_token() -> str | None:
+    """
+    Get a Spotify access token using Client Credentials flow.
+    Requires SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET env vars.
+    Returns token string or None if not configured.
+    """
+    client_id     = os.getenv("SPOTIFY_CLIENT_ID", "")
+    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        return None
+    try:
+        import base64
+        creds   = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        headers = {"Authorization": f"Basic {creds}",
+                   "Content-Type": "application/x-www-form-urlencoded"}
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                "https://accounts.spotify.com/api/token",
+                data={"grant_type": "client_credentials"},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return data.get("access_token")
+    except Exception as e:
+        print(f"Spotify token error: {e}")
+    return None
+
+async def resolve_spotify(url_or_id: str) -> dict | None:
+    """
+    Resolve a Spotify track/album/playlist URL to track info using the Spotify API.
+    Falls back to oEmbed if API credentials not set.
+    Returns dict with keys: title, artist, album, duration_ms, search_query
+    """
+    # ── Extract Spotify ID and type ───────────────────────────────────────
+    sp_re = re.compile(
+        r'https?://open\.spotify\.com/(track|album|playlist)/([a-zA-Z0-9]+)'
+    )
+    m = sp_re.search(url_or_id)
+    if not m:
+        return None
+
+    sp_type = m.group(1)   # track / album / playlist
+    sp_id   = m.group(2)
+
+    token = await get_spotify_token()
+
+    # ── Full Spotify API (best quality metadata) ──────────────────────────
+    if token:
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"https://api.spotify.com/v1/tracks/{sp_id}",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as r:
+                    if r.status == 200:
+                        d       = await r.json()
+                        title   = d.get("name", "")
+                        artists = ", ".join(a["name"] for a in d.get("artists", []))
+                        album   = d.get("album", {}).get("name", "")
+                        dur_ms  = d.get("duration_ms", 0)
+                        # Build the best possible YouTube search query
+                        search  = f"{artists} - {title} official audio"
+                        return {
+                            "title":        title,
+                            "artist":       artists,
+                            "album":        album,
+                            "duration_ms":  dur_ms,
+                            "search_query": search,
+                            "source":       "spotify_api",
+                        }
+        except Exception as e:
+            print(f"Spotify API track error: {e}")
+
+    # ── Fallback: oEmbed (no credentials needed) ─────────────────────────
+    try:
+        oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{sp_id}"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    data    = await r.json()
+                    title   = data.get("title", "")
+                    artist  = data.get("author_name", "")
+                    search  = f"{artist} - {title} official audio"
+                    return {
+                        "title":        title,
+                        "artist":       artist,
+                        "album":        "",
+                        "duration_ms":  0,
+                        "search_query": search,
+                        "source":       "oembed",
+                    }
+    except Exception as e:
+        print(f"Spotify oEmbed error: {e}")
+
+    return None
+
+def smart_search_query(raw: str) -> str:
+    """
+    Convert a natural song search like:
+      'blinding lights weeknd'
+      'artist: weeknd song: blinding lights'
+      'weeknd - blinding lights'
+    into the best YouTube search query.
+    """
+    raw = raw.strip()
+
+    # Already a URL — return as-is
+    if re.match(r'https?://', raw):
+        return raw
+
+    # Pattern: "artist - song" or "artist – song"
+    dash_match = re.match(r'^(.+?)\s*[-–]\s*(.+)$', raw)
+    if dash_match:
+        artist = dash_match.group(1).strip()
+        song   = dash_match.group(2).strip()
+        return f"{artist} - {song} official audio"
+
+    # Pattern: "song by artist"
+    by_match = re.match(r'^(.+?)\s+by\s+(.+)$', raw, re.IGNORECASE)
+    if by_match:
+        song   = by_match.group(1).strip()
+        artist = by_match.group(2).strip()
+        return f"{artist} - {song} official audio"
+
+    # Pattern: "artist: X song: Y" or "song: X artist: Y"
+    kv = {}
+    for key in ("artist", "song", "track"):
+        match = re.search(rf'{key}[:\s]+([^,\n]+)', raw, re.IGNORECASE)
+        if match:
+            kv[key] = match.group(1).strip()
+    if "artist" in kv and ("song" in kv or "track" in kv):
+        song = kv.get("song") or kv.get("track")
+        return f"{kv['artist']} - {song} official audio"
+
+    # Plain text search — just append "audio" for better results
+    return f"{raw} audio"
+
 async def resolve_audio(query: str):
     """
-    Resolve audio URL with multiple bypass strategies.
+    Resolve audio URL with:
+    - Smart Spotify resolution (API → oEmbed fallback)
+    - Smart song name/artist search
+    - Multiple YouTube bypass strategies
     Tries: default → android → tv → ios → mweb
-    Also handles Spotify → YouTube conversion.
     """
     import yt_dlp
 
     original_query = query.strip()
+    spotify_info   = None
 
-    # ── Spotify → YouTube search ──────────────────────────────────────────
-    spotify_track_re = re.compile(r'https?://open\.spotify\.com/track/([a-zA-Z0-9]+)')
-    m = spotify_track_re.match(original_query)
-    if m:
-        try:
-            track_id = m.group(1)
-            oembed   = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{track_id}"
-            async with aiohttp.ClientSession() as s:
-                async with s.get(oembed, timeout=aiohttp.ClientTimeout(total=8)) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        q = f"{data.get('title', '')} {data.get('author_name', '')} audio"
-                        query = q.strip()
-                        print(f"Spotify resolved to: {query}")
-        except Exception as e:
-            print(f"Spotify resolve error: {e}")
-            query = original_query
+    # ── Spotify URL ───────────────────────────────────────────────────────
+    if "open.spotify.com" in original_query:
+        spotify_info = await resolve_spotify(original_query)
+        if spotify_info:
+            query = spotify_info["search_query"]
+            print(f"Spotify → YouTube search: {query}")
+        else:
+            # Strip to plain text search if resolve fails
+            query = re.sub(r'https?://\S+', '', original_query).strip() or original_query
 
-    # ── PO.PINION / SoundCloud / other direct URLs ────────────────────────
-    # If query is a non-YouTube/Spotify URL, just pass it through
-    non_yt_url = re.match(r'https?://', query) and 'youtube' not in query and 'youtu.be' not in query
+    # ── Smart search for non-URL queries ─────────────────────────────────
+    elif not re.match(r'https?://', original_query):
+        query = smart_search_query(original_query)
+        print(f"Smart search query: {query}")
 
     strategies = ["default", "android", "tv", "ios", "mweb", "web_embedded"]
     loop = asyncio.get_event_loop()
@@ -622,11 +759,21 @@ async def resolve_audio(query: str):
                     else:
                         url = info.get("url")
 
-                    return url, info.get("title", q), info.get("thumbnail"), info.get("duration", 0)
+                    yt_title = info.get("title", q)
+                    return url, yt_title, info.get("thumbnail"), info.get("duration", 0)
 
-            result = await loop.run_in_executor(None, _extract)
+            url, yt_title, thumb, dur = await loop.run_in_executor(None, _extract)
             print(f"Resolved '{query}' using strategy: {strategy}")
-            return result
+
+            # Use clean Spotify metadata for title if available
+            if spotify_info:
+                display_title = f"{spotify_info['artist']} — {spotify_info['title']}"
+                if spotify_info.get("album"):
+                    display_title += f"\n*{spotify_info['album']}*"
+            else:
+                display_title = yt_title
+
+            return url, display_title, thumb, dur
 
         except Exception as e:
             last_error = e
@@ -1519,6 +1666,7 @@ async def keepalive():
 
 async def main():
     async with bot:
+        await setup_cookies()
         await keepalive()
         await bot.start(BOT_TOKEN)
 
@@ -1527,3 +1675,24 @@ if __name__ == "__main__":
         print("Set BOT_TOKEN env var")
         sys.exit(1)
     asyncio.run(main())
+
+async def setup_cookies():
+    content = os.getenv("YOUTUBE_COOKIES_CONTENT", "")
+    if content:
+        path = "/tmp/yt_cookies.txt"
+        with open(path, "w") as f:
+            f.write(content)
+        os.environ["YTDLP_COOKIES"] = path
+        print(f"✅ YouTube cookies written ({len(content)} chars)")
+    else:
+        existing = os.getenv("YTDLP_COOKIES", "")
+        if existing and os.path.exists(existing):
+            print(f"✅ Using existing cookies file: {existing}")
+        else:
+            print("⚠️  No YouTube cookies — set YOUTUBE_COOKIES_CONTENT in Railway")
+    sp_id  = os.getenv("SPOTIFY_CLIENT_ID", "")
+    sp_sec = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+    if sp_id and sp_sec:
+        print(f"✅ Spotify API configured")
+    else:
+        print("ℹ️  Spotify using oEmbed fallback (set SPOTIFY_CLIENT_ID + SPOTIFY_CLIENT_SECRET for better results)")
