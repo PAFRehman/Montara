@@ -254,19 +254,9 @@ async def fetch_crypto(symbol: str):
 
 # ── COMMODITY LIVE PRICE (multi-source with robust fallbacks) ─────────────────
 async def fetch_commodity_price(key: str):
-    """
-    Priority chain:
-      1. metals-api.com free tier (precious metals)
-      2. frankfurter.app (USD/metal cross)
-      3. metals.live API
-      4. stooq CSV (futures)
-      5. static fallback
-    Returns (price: float, is_fallback: bool, source: str)
-    """
     info = COMMODITIES[key]
     sym  = info["symbol"]
 
-    # ── 1. Precious metals via metals.live ──────────────────────────────
     if sym in ("XAU","XAG","XPT","XPD"):
         try:
             data = await fetch_json(f"https://api.metals.live/v1/spot/{sym.lower()}")
@@ -276,7 +266,6 @@ async def fetch_commodity_price(key: str):
                     return float(val), False, "metals.live"
         except: pass
 
-        # ── 2. frankfurter.app cross-rate ──────────────────────────────
         try:
             data = await fetch_json(f"https://api.frankfurter.app/latest?from=USD&to={sym}")
             rate = data.get("rates", {}).get(sym)
@@ -284,7 +273,6 @@ async def fetch_commodity_price(key: str):
                 return round(1 / float(rate), 2), False, "frankfurter"
         except: pass
 
-        # ── 3. Open Exchange Rates commodity proxy (free, no key) ──────
         try:
             metal_map = {"XAU": "gold", "XAG": "silver", "XPT": "platinum", "XPD": "palladium"}
             metal_name = metal_map[sym]
@@ -296,7 +284,6 @@ async def fetch_commodity_price(key: str):
                 return round(1 / float(rate), 2), False, "commodities-api"
         except: pass
 
-    # ── 4. stooq.com CSV futures ────────────────────────────────────────
     stooq_map = {
         "BRENTOIL": "@CL.F", "NATGAS": "@NG.F", "COPPER": "HG.F",
         "WHEAT": "@W.F",    "CORN":   "@C.F",
@@ -304,7 +291,6 @@ async def fetch_commodity_price(key: str):
         "CT.F":  "CT.F",    "LB.F":   "LB.F",  "OJ.F":  "OJ.F",
         "LE.F":  "LE.F",    "HE.F":   "HE.F",  "GF.F":  "GF.F",
         "DL.F":  "DL.F",
-        # precious metals fallthrough
         "XAU": "XAUUSD","XAG": "XAGUSD","XPT": "XPTUSD","XPD": "XPDUSD",
     }
     stooq_sym = stooq_map.get(sym)
@@ -317,12 +303,11 @@ async def fetch_commodity_price(key: str):
             lines = [l for l in text.strip().split("\n") if l and "N/D" not in l]
             if len(lines) >= 2:
                 cols  = lines[-1].split(",")
-                price = float(cols[4])  # close
+                price = float(cols[4])
                 if price > 0:
                     return price, False, "stooq"
         except: pass
 
-    # ── 5. Yahoo Finance API (unofficial, but reliable) ─────────────────
     yf_map = {
         "XAU": "GC=F", "XAG": "SI=F", "XPT": "PL=F", "XPD": "PA=F",
         "BRENTOIL": "BZ=F", "NATGAS": "NG=F", "COPPER": "HG=F",
@@ -345,14 +330,9 @@ async def fetch_commodity_price(key: str):
                     return float(price), False, "yahoo"
         except: pass
 
-    # ── 6. Static fallback ───────────────────────────────────────────────
     return info["fallback"], True, "fallback"
 
 async def fetch_commodity_history(key: str, days: int = 30):
-    """
-    Fetch historical commodity data from Yahoo Finance or generate seeded estimates.
-    Returns list of (datetime, price) tuples.
-    """
     info    = COMMODITIES[key]
     sym     = info["symbol"]
     yf_map  = {
@@ -384,7 +364,6 @@ async def fetch_commodity_history(key: str, days: int = 30):
         except Exception as e:
             print(f"Yahoo history error: {e}")
 
-    # Seeded estimate fallback
     live_price, _, _ = await fetch_commodity_price(key)
     np.random.seed(int(live_price * 13) % 99991)
     noise  = np.cumsum(np.random.randn(days) * live_price * 0.008)
@@ -423,7 +402,6 @@ async def crypto_chart_buf(coin_id: str, days: int) -> io.BytesIO | None:
         ax.annotate(f"{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%",
                     xy=(0.01, 0.93), xycoords="axes fraction",
                     color=badge_col, fontsize=11, fontweight="bold")
-        # Current price annotation
         ax.annotate(fmt_price(vs[-1]),
                     xy=(1.0, vs[-1]), xycoords=("axes fraction", "data"),
                     xytext=(5, 0), textcoords="offset points",
@@ -439,7 +417,6 @@ async def crypto_chart_buf(coin_id: str, days: int) -> io.BytesIO | None:
         return None
 
 async def commodity_chart_buf(key: str, days: int = 30) -> io.BytesIO | None:
-    """Generate a commodity chart with real or estimated historical data."""
     try:
         info  = COMMODITIES[key]
         pairs, is_estimated = await fetch_commodity_history(key, days)
@@ -455,7 +432,6 @@ async def commodity_chart_buf(key: str, days: int = 30) -> io.BytesIO | None:
         ax.plot(dates, series, color=col, linewidth=2.2, zorder=5)
         ax.fill_between(dates, series, min(series) * 0.995, alpha=0.22, color=col)
 
-        # Smart date formatting based on range
         if days <= 7:
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
         elif days <= 90:
@@ -479,7 +455,6 @@ async def commodity_chart_buf(key: str, days: int = 30) -> io.BytesIO | None:
                     xy=(0.01, 0.93), xycoords="axes fraction",
                     color=badge_col, fontsize=10, fontweight="bold")
 
-        # High / Low bands
         ax.axhline(max(series), color="#444", linewidth=0.8, linestyle=":", alpha=0.7)
         ax.axhline(min(series), color="#444", linewidth=0.8, linestyle=":", alpha=0.7)
         ax.annotate(f"H: ${max(series):,.2f}", xy=(0.01, 0.06), xycoords="axes fraction",
@@ -511,12 +486,10 @@ FFMPEG_OPTS = {
 }
 
 def _build_ydl_opts(strategy: str = "default") -> dict:
-    """
-    Build yt-dlp options with different bypass strategies.
-    strategy: 'default', 'android', 'tv', 'web_embedded', 'ios'
-    """
     cookie_file    = os.getenv("YTDLP_COOKIES", "")
     cookie_browser = os.getenv("YTDLP_COOKIES_BROWSER", "")
+    proxy          = os.getenv("YTDLP_PROXY", "")
+    custom_ua      = os.getenv("YTDLP_USER_AGENT", "")
 
     base = {
         "format": (
@@ -534,18 +507,20 @@ def _build_ydl_opts(strategy: str = "default") -> dict:
         "retries": 3,
         "fragment_retries": 5,
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": custom_ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     }
 
-    # Strategy-specific player client selection
+    if proxy:
+        base["proxy"] = proxy
+
     strategy_map = {
         "default":     {"player_client": ["web", "android", "tv_embedded"]},
         "android":     {"player_client": ["android", "android_music"]},
         "tv":          {"player_client": ["tv_embedded", "web_embedded"]},
-        "web_embedded":{"player_client": ["web_embedded"]},
+        "web_embedded":{"player_client": ["web_embedded"], "player_skip": ["webpage", "configs", "js"]},
         "ios":         {"player_client": ["ios", "ios_music"]},
         "mweb":        {"player_client": ["mweb"]},
     }
@@ -565,11 +540,6 @@ def _build_ydl_opts(strategy: str = "default") -> dict:
     return base
 
 async def get_spotify_token() -> str | None:
-    """
-    Get a Spotify access token using Client Credentials flow.
-    Requires SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET env vars.
-    Returns token string or None if not configured.
-    """
     client_id     = os.getenv("SPOTIFY_CLIENT_ID", "")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "")
     if not client_id or not client_secret:
@@ -594,13 +564,6 @@ async def get_spotify_token() -> str | None:
     return None
 
 async def resolve_spotify(url_or_id: str) -> dict | None:
-    """
-    Resolve a Spotify track/album/playlist/artist URL to track info.
-    Uses oEmbed (NO credentials required) as primary path.
-    Optional Spotify API fallback if Client ID/Secret are configured.
-    Returns dict with keys: title, artist, album, duration_ms, search_query
-    """
-    # ── Extract Spotify ID and type ───────────────────────────────────────
     sp_re = re.compile(
         r'https?://open\.spotify\.com/(track|album|playlist|artist)/([a-zA-Z0-9]+)'
     )
@@ -608,10 +571,9 @@ async def resolve_spotify(url_or_id: str) -> dict | None:
     if not m:
         return None
 
-    sp_type = m.group(1)   # track / album / playlist / artist
+    sp_type = m.group(1)
     sp_id   = m.group(2)
 
-    # ── 1. oEmbed: ZERO credentials needed ────────────────────────────────
     try:
         oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/{sp_type}/{sp_id}"
         async with aiohttp.ClientSession() as s:
@@ -627,7 +589,7 @@ async def resolve_spotify(url_or_id: str) -> dict | None:
                         search = f"{artist} {title} full album"
                     elif sp_type == "playlist":
                         search = f"{artist} {title} playlist"
-                    else:  # artist
+                    else:
                         search = f"{artist} best songs"
 
                     return {
@@ -641,7 +603,6 @@ async def resolve_spotify(url_or_id: str) -> dict | None:
     except Exception as e:
         print(f"Spotify oEmbed error: {e}")
 
-    # ── 2. Spotify API (optional, only if creds configured) ───────────────
     token = await get_spotify_token()
     if token and sp_type == "track":
         try:
@@ -669,7 +630,6 @@ async def resolve_spotify(url_or_id: str) -> dict | None:
         except Exception as e:
             print(f"Spotify API track error: {e}")
 
-    # ── 3. Fallback ───────────────────────────────────────────────────────
     return {
         "title":        f"Spotify {sp_type}",
         "artist":       "",
@@ -680,30 +640,22 @@ async def resolve_spotify(url_or_id: str) -> dict | None:
     }
 
 def smart_search_query(raw: str) -> str:
-    """
-    Convert a natural song search into the best YouTube search query.
-    """
     raw = raw.strip()
-
-    # Already a URL — return as-is
     if re.match(r'https?://', raw):
         return raw
 
-    # Pattern: "artist - song" or "artist – song"
     dash_match = re.match(r'^(.+?)\s*[-–]\s*(.+)$', raw)
     if dash_match:
         artist = dash_match.group(1).strip()
         song   = dash_match.group(2).strip()
         return f"{artist} - {song} official audio"
 
-    # Pattern: "song by artist"
     by_match = re.match(r'^(.+?)\s+by\s+(.+)$', raw, re.IGNORECASE)
     if by_match:
         song   = by_match.group(1).strip()
         artist = by_match.group(2).strip()
         return f"{artist} - {song} official audio"
 
-    # Pattern: "artist: X song: Y" or "song: X artist: Y"
     kv = {}
     for key in ("artist", "song", "track"):
         match = re.search(rf'{key}[:\s]+([^,\n]+)', raw, re.IGNORECASE)
@@ -713,33 +665,22 @@ def smart_search_query(raw: str) -> str:
         song = kv.get("song") or kv.get("track")
         return f"{kv['artist']} - {song} official audio"
 
-    # Plain text search — just append "audio" for better results
     return f"{raw} audio"
 
 async def resolve_audio(query: str):
-    """
-    Resolve audio URL with:
-    - Smart Spotify resolution (oEmbed → optional API)
-    - Smart song name/artist search
-    - Multiple YouTube bypass strategies
-    Tries: default → android → tv → ios → mweb
-    """
     import yt_dlp
 
     original_query = query.strip()
     spotify_info   = None
 
-    # ── Spotify URL ───────────────────────────────────────────────────────
     if "open.spotify.com" in original_query:
         spotify_info = await resolve_spotify(original_query)
         if spotify_info:
             query = spotify_info["search_query"]
             print(f"Spotify → YouTube search: {query}")
         else:
-            # Strip to plain text search if resolve fails
             query = re.sub(r'https?://\S+', '', original_query).strip() or original_query
 
-    # ── Smart search for non-URL queries ─────────────────────────────────
     elif not re.match(r'https?://', original_query):
         query = smart_search_query(original_query)
         print(f"Smart search query: {query}")
@@ -757,7 +698,6 @@ async def resolve_audio(query: str):
                     if "entries" in info:
                         info = info["entries"][0]
 
-                    # Pick highest quality audio-only stream
                     fmts = [
                         f for f in info.get("formats", [])
                         if f.get("acodec") != "none"
@@ -776,7 +716,6 @@ async def resolve_audio(query: str):
             url, yt_title, thumb, dur = await loop.run_in_executor(None, _extract)
             print(f"Resolved '{query}' using strategy: {strategy}")
 
-            # Use clean Spotify metadata for title if available
             if spotify_info:
                 if spotify_info.get("artist"):
                     display_title = f"{spotify_info['artist']} — {spotify_info['title']}"
@@ -792,12 +731,10 @@ async def resolve_audio(query: str):
         except Exception as e:
             last_error = e
             err_str = str(e)
-            # Only retry on bot-detection errors
             if "Sign in to confirm" in err_str or "bot" in err_str.lower():
                 print(f"Strategy '{strategy}' blocked, retrying... ({e})")
                 await asyncio.sleep(0.5)
                 continue
-            # For other errors (DRM, private, unavailable), raise immediately
             raise
 
     raise Exception(f"All bypass strategies failed. Last error: {last_error}")
@@ -842,9 +779,10 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel = None):
                     title="⚠️ YouTube Bot Detection",
                     description=(
                         f"Could not play `{url_or_query}`\n\n"
-                        "**Fix:** Set the `YTDLP_COOKIES` environment variable to a path of exported YouTube cookies.\n"
-                        "Or set `YTDLP_COOKIES_BROWSER=chrome` (or `firefox`) to use your browser's cookies.\n\n"
-                        "📖 [How to export cookies](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)"
+                        "**Fix 1:** Export fresh YouTube cookies from your browser and set `YOUTUBE_COOKIES_CONTENT` env var.\n"
+                        "**Fix 2:** Set `YTDLP_USER_AGENT` to match your browser's User-Agent.\n"
+                        "**Fix 3:** If on a cloud server, use a residential proxy: `YTDLP_PROXY=http://user:pass@host:port`\n\n"
+                        "📖 [Export cookies guide](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)"
                     ),
                     color=0xff4444
                 )
@@ -1002,7 +940,7 @@ async def cmd_coins(interaction: discord.Interaction):
                                             ephemeral=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SLASH COMMANDS — COMMODITIES (with custom timeframe charts)
+# SLASH COMMANDS — COMMODITIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
 COMMODITY_CHOICES = [
@@ -1091,7 +1029,6 @@ async def cmd_commodities_all(interaction: discord.Interaction):
     embed = discord.Embed(title="📊 Live Commodity Prices", color=0xFFD700,
                           timestamp=datetime.datetime.utcnow())
 
-    # Fetch top 8 commodities in parallel
     keys = ["gold", "silver", "oil", "gas", "copper", "wheat", "corn", "coffee"]
     results = await asyncio.gather(*[fetch_commodity_price(k) for k in keys])
 
@@ -1226,7 +1163,7 @@ async def cmd_nowplaying(interaction: discord.Interaction):
         await interaction.response.send_message("Nothing playing right now.", ephemeral=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SLASH COMMANDS — SMOKING (categorized + targeting)
+# SLASH COMMANDS — SMOKING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SMOKE_CATEGORY_CHOICES = [
@@ -1276,7 +1213,7 @@ async def cmd_smoke(interaction: discord.Interaction,
     ping_content = None
     if target:
         desc = f"Hey {target.mention} — {chosen_line}"
-        ping_content = target.mention  # ← Actually sends a notification
+        ping_content = target.mention
 
     embed = discord.Embed(
         title=title,
@@ -1294,7 +1231,7 @@ async def cmd_smoke(interaction: discord.Interaction,
     )
 
     await interaction.response.send_message(
-        content=ping_content,  # ← This is what actually pings the user
+        content=ping_content,
         embed=embed,
         view=make_dismiss_view(interaction.user.id)
     )
@@ -1330,11 +1267,9 @@ class GiveawayView(discord.ui.View):
                 f"✅ You entered! Total entries: **{count}**", ephemeral=True
             )
 
-        # Update the embed entry count
         try:
             msg   = await interaction.channel.fetch_message(self.giveaway_id)
             embed = msg.embeds[0]
-            # Update entries field
             for i, field in enumerate(embed.fields):
                 if "Entries" in field.name:
                     embed.set_field_at(i, name="👥 Entries", value=str(len(gw["entries"])), inline=True)
@@ -1356,7 +1291,7 @@ async def cmd_giveaway(interaction: discord.Interaction,
                        duration_minutes: int,
                        winners: int = 1,
                        required_role: discord.Role = None):
-    if duration_minutes < 1 or duration_minutes > 10080:  # max 7 days
+    if duration_minutes < 1 or duration_minutes > 10080:
         await interaction.response.send_message(
             "❌ Duration must be between 1 minute and 7 days (10080 minutes).", ephemeral=True
         )
@@ -1384,9 +1319,7 @@ async def cmd_giveaway(interaction: discord.Interaction,
 
     msg = await interaction.followup.send(embed=embed)
 
-    # We need the actual message object — followup returns it
     try:
-        # Re-fetch to get the real message ID
         sent_msg = await interaction.channel.fetch_message(msg.id)
     except:
         sent_msg = msg
@@ -1407,7 +1340,6 @@ async def cmd_giveaway(interaction: discord.Interaction,
     view = GiveawayView(sent_msg.id)
     await sent_msg.edit(embed=embed, view=view)
 
-    # Schedule the end
     await asyncio.sleep(duration_minutes * 60)
     await end_giveaway(sent_msg.id, interaction.channel)
 
@@ -1440,7 +1372,6 @@ async def end_giveaway(message_id: int, channel: discord.TextChannel):
     winner_ids = random.sample(entries, winners_count)
     winner_mentions = " ".join(f"<@{uid}>" for uid in winner_ids)
 
-    # Update original message
     ended_embed = discord.Embed(
         title="🎉 GIVEAWAY ENDED",
         description=f"**Prize:** {gw['prize']}\n\n🏆 **Winner(s):** {winner_mentions}",
@@ -1452,7 +1383,6 @@ async def end_giveaway(message_id: int, channel: discord.TextChannel):
     if msg:
         await msg.edit(embed=ended_embed, view=None)
 
-    # Announce winners — content= pings them, embed is the visual
     announce_embed = discord.Embed(
         title="🎊 Giveaway Results!",
         description=(
@@ -1682,21 +1612,25 @@ async def keepalive():
     await site.start()
     print(f"Health check on :{os.getenv('PORT', '8080')}")
 
-# ── SETUP COOKIES (moved here so it exists before main() calls it) ────────────
 async def setup_cookies():
     content = os.getenv("YOUTUBE_COOKIES_CONTENT", "")
     if content:
-        path = "/tmp/yt_cookies.txt"
-        with open(path, "w") as f:
-            f.write(content)
-        os.environ["YTDLP_COOKIES"] = path
-        print(f"✅ YouTube cookies written ({len(content)} chars)")
+        # Validate Netscape format
+        if not content.strip().startswith("# Netscape HTTP Cookie File") and not content.strip().startswith("# HTTP Cookie File"):
+            print("⚠️  YOUTUBE_COOKIES_CONTENT does not look like a Netscape cookies file!")
+            print("     First line should be: # Netscape HTTP Cookie File")
+        else:
+            path = "/tmp/yt_cookies.txt"
+            with open(path, "w") as f:
+                f.write(content)
+            os.environ["YTDLP_COOKIES"] = path
+            print(f"✅ YouTube cookies written ({len(content)} chars)")
     else:
         existing = os.getenv("YTDLP_COOKIES", "")
         if existing and os.path.exists(existing):
             print(f"✅ Using existing cookies file: {existing}")
         else:
-            print("⚠️  No YouTube cookies — set YOUTUBE_COOKIES_CONTENT in Railway")
+            print("⚠️  No YouTube cookies — set YOUTUBE_COOKIES_CONTENT env var")
     sp_id  = os.getenv("SPOTIFY_CLIENT_ID", "")
     sp_sec = os.getenv("SPOTIFY_CLIENT_SECRET", "")
     if sp_id and sp_sec:
