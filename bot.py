@@ -254,9 +254,19 @@ async def fetch_crypto(symbol: str):
 
 # ── COMMODITY LIVE PRICE (multi-source with robust fallbacks) ─────────────────
 async def fetch_commodity_price(key: str):
+    """
+    Priority chain:
+      1. metals-api.com free tier (precious metals)
+      2. frankfurter.app (USD/metal cross)
+      3. metals.live API
+      4. stooq CSV (futures)
+      5. static fallback
+    Returns (price: float, is_fallback: bool, source: str)
+    """
     info = COMMODITIES[key]
     sym  = info["symbol"]
 
+    # ── 1. Precious metals via metals.live ──────────────────────────────
     if sym in ("XAU","XAG","XPT","XPD"):
         try:
             data = await fetch_json(f"https://api.metals.live/v1/spot/{sym.lower()}")
@@ -266,6 +276,7 @@ async def fetch_commodity_price(key: str):
                     return float(val), False, "metals.live"
         except: pass
 
+        # ── 2. frankfurter.app cross-rate ──────────────────────────────
         try:
             data = await fetch_json(f"https://api.frankfurter.app/latest?from=USD&to={sym}")
             rate = data.get("rates", {}).get(sym)
@@ -273,6 +284,7 @@ async def fetch_commodity_price(key: str):
                 return round(1 / float(rate), 2), False, "frankfurter"
         except: pass
 
+        # ── 3. Open Exchange Rates commodity proxy (free, no key) ──────
         try:
             metal_map = {"XAU": "gold", "XAG": "silver", "XPT": "platinum", "XPD": "palladium"}
             metal_name = metal_map[sym]
@@ -284,6 +296,7 @@ async def fetch_commodity_price(key: str):
                 return round(1 / float(rate), 2), False, "commodities-api"
         except: pass
 
+    # ── 4. stooq.com CSV futures ────────────────────────────────────────
     stooq_map = {
         "BRENTOIL": "@CL.F", "NATGAS": "@NG.F", "COPPER": "HG.F",
         "WHEAT": "@W.F",    "CORN":   "@C.F",
@@ -291,6 +304,7 @@ async def fetch_commodity_price(key: str):
         "CT.F":  "CT.F",    "LB.F":   "LB.F",  "OJ.F":  "OJ.F",
         "LE.F":  "LE.F",    "HE.F":   "HE.F",  "GF.F":  "GF.F",
         "DL.F":  "DL.F",
+        # precious metals fallthrough
         "XAU": "XAUUSD","XAG": "XAGUSD","XPT": "XPTUSD","XPD": "XPDUSD",
     }
     stooq_sym = stooq_map.get(sym)
@@ -303,11 +317,12 @@ async def fetch_commodity_price(key: str):
             lines = [l for l in text.strip().split("\n") if l and "N/D" not in l]
             if len(lines) >= 2:
                 cols  = lines[-1].split(",")
-                price = float(cols[4])
+                price = float(cols[4])  # close
                 if price > 0:
                     return price, False, "stooq"
         except: pass
 
+    # ── 5. Yahoo Finance API (unofficial, but reliable) ─────────────────
     yf_map = {
         "XAU": "GC=F", "XAG": "SI=F", "XPT": "PL=F", "XPD": "PA=F",
         "BRENTOIL": "BZ=F", "NATGAS": "NG=F", "COPPER": "HG=F",
@@ -330,9 +345,14 @@ async def fetch_commodity_price(key: str):
                     return float(price), False, "yahoo"
         except: pass
 
+    # ── 6. Static fallback ───────────────────────────────────────────────
     return info["fallback"], True, "fallback"
 
 async def fetch_commodity_history(key: str, days: int = 30):
+    """
+    Fetch historical commodity data from Yahoo Finance or generate seeded estimates.
+    Returns list of (datetime, price) tuples.
+    """
     info    = COMMODITIES[key]
     sym     = info["symbol"]
     yf_map  = {
@@ -364,6 +384,7 @@ async def fetch_commodity_history(key: str, days: int = 30):
         except Exception as e:
             print(f"Yahoo history error: {e}")
 
+    # Seeded estimate fallback
     live_price, _, _ = await fetch_commodity_price(key)
     np.random.seed(int(live_price * 13) % 99991)
     noise  = np.cumsum(np.random.randn(days) * live_price * 0.008)
@@ -402,6 +423,7 @@ async def crypto_chart_buf(coin_id: str, days: int) -> io.BytesIO | None:
         ax.annotate(f"{'▲' if chg >= 0 else '▼'} {abs(chg):.2f}%",
                     xy=(0.01, 0.93), xycoords="axes fraction",
                     color=badge_col, fontsize=11, fontweight="bold")
+        # Current price annotation
         ax.annotate(fmt_price(vs[-1]),
                     xy=(1.0, vs[-1]), xycoords=("axes fraction", "data"),
                     xytext=(5, 0), textcoords="offset points",
@@ -417,6 +439,7 @@ async def crypto_chart_buf(coin_id: str, days: int) -> io.BytesIO | None:
         return None
 
 async def commodity_chart_buf(key: str, days: int = 30) -> io.BytesIO | None:
+    """Generate a commodity chart with real or estimated historical data."""
     try:
         info  = COMMODITIES[key]
         pairs, is_estimated = await fetch_commodity_history(key, days)
@@ -432,6 +455,7 @@ async def commodity_chart_buf(key: str, days: int = 30) -> io.BytesIO | None:
         ax.plot(dates, series, color=col, linewidth=2.2, zorder=5)
         ax.fill_between(dates, series, min(series) * 0.995, alpha=0.22, color=col)
 
+        # Smart date formatting based on range
         if days <= 7:
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
         elif days <= 90:
@@ -455,6 +479,7 @@ async def commodity_chart_buf(key: str, days: int = 30) -> io.BytesIO | None:
                     xy=(0.01, 0.93), xycoords="axes fraction",
                     color=badge_col, fontsize=10, fontweight="bold")
 
+        # High / Low bands
         ax.axhline(max(series), color="#444", linewidth=0.8, linestyle=":", alpha=0.7)
         ax.axhline(min(series), color="#444", linewidth=0.8, linestyle=":", alpha=0.7)
         ax.annotate(f"H: ${max(series):,.2f}", xy=(0.01, 0.06), xycoords="axes fraction",
@@ -472,7 +497,7 @@ async def commodity_chart_buf(key: str, days: int = 30) -> io.BytesIO | None:
         print(f"Commodity chart error: {e}")
         return None
 
-# ── MUSIC — RAILWAY-OPTIMIZED YTDLP ──────────────────────────────────────────
+# ── MUSIC — IMPROVED YTDLP WITH BYPASS STRATEGIES ────────────────────────────
 FFMPEG_OPTS = {
     "before_options": (
         "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
@@ -486,11 +511,12 @@ FFMPEG_OPTS = {
 }
 
 def _build_ydl_opts(strategy: str = "default") -> dict:
+    """
+    Build yt-dlp options with different bypass strategies.
+    strategy: 'default', 'android', 'tv', 'web_embedded', 'ios'
+    """
     cookie_file    = os.getenv("YTDLP_COOKIES", "")
     cookie_browser = os.getenv("YTDLP_COOKIES_BROWSER", "")
-    proxy          = os.getenv("YTDLP_PROXY", "")
-    custom_ua      = os.getenv("YTDLP_USER_AGENT", "")
-    po_token       = os.getenv("YOUTUBE_PO_TOKEN", "")
 
     base = {
         "format": (
@@ -508,23 +534,18 @@ def _build_ydl_opts(strategy: str = "default") -> dict:
         "retries": 3,
         "fragment_retries": 5,
         "http_headers": {
-            "User-Agent": custom_ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Sec-Fetch-Mode": "navigate",
         },
     }
 
-    if proxy:
-        base["proxy"] = proxy
-
-    # Strategy-specific player client selection with PO token support
+    # Strategy-specific player client selection
     strategy_map = {
-        "default":     {"player_client": ["web", "web_creator", "android", "tv_embedded"]},
-        "web_creator":   {"player_client": ["web_creator"], "po_token": [po_token] if po_token else []},
+        "default":     {"player_client": ["web", "android", "tv_embedded"]},
         "android":     {"player_client": ["android", "android_music"]},
         "tv":          {"player_client": ["tv_embedded", "web_embedded"]},
-        "web_embedded":{"player_client": ["web_embedded"], "player_skip": ["webpage", "configs", "js"]},
+        "web_embedded":{"player_client": ["web_embedded"]},
         "ios":         {"player_client": ["ios", "ios_music"]},
         "mweb":        {"player_client": ["mweb"]},
     }
@@ -536,10 +557,6 @@ def _build_ydl_opts(strategy: str = "default") -> dict:
         }
     }
 
-    # Add PO token to default strategy too if available
-    if po_token and strategy == "default":
-        base["extractor_args"]["youtube"]["po_token"] = [po_token]
-
     if cookie_file and os.path.exists(cookie_file):
         base["cookies"] = cookie_file
     elif cookie_browser:
@@ -548,6 +565,11 @@ def _build_ydl_opts(strategy: str = "default") -> dict:
     return base
 
 async def get_spotify_token() -> str | None:
+    """
+    Get a Spotify access token using Client Credentials flow.
+    Requires SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET env vars.
+    Returns token string or None if not configured.
+    """
     client_id     = os.getenv("SPOTIFY_CLIENT_ID", "")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "")
     if not client_id or not client_secret:
@@ -572,49 +594,28 @@ async def get_spotify_token() -> str | None:
     return None
 
 async def resolve_spotify(url_or_id: str) -> dict | None:
+    """
+    Resolve a Spotify track/album/playlist URL to track info using the Spotify API.
+    Falls back to oEmbed if API credentials not set.
+    Returns dict with keys: title, artist, album, duration_ms, search_query
+    """
+    # ── Extract Spotify ID and type ───────────────────────────────────────
     sp_re = re.compile(
-        r'https?://open\.spotify\.com/(track|album|playlist|artist)/([a-zA-Z0-9]+)'
+        r'https?://open\.spotify\.com/(track|album|playlist)/([a-zA-Z0-9]+)'
     )
     m = sp_re.search(url_or_id)
     if not m:
         return None
 
-    sp_type = m.group(1)
+    sp_type = m.group(1)   # track / album / playlist
     sp_id   = m.group(2)
 
-    try:
-        oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/{sp_type}/{sp_id}"
-        async with aiohttp.ClientSession() as s:
-            async with s.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
-                if r.status == 200:
-                    data   = await r.json()
-                    title  = data.get("title", "")
-                    artist = data.get("author_name", "")
-
-                    if sp_type == "track":
-                        search = f"{artist} - {title} official audio"
-                    elif sp_type == "album":
-                        search = f"{artist} {title} full album"
-                    elif sp_type == "playlist":
-                        search = f"{artist} {title} playlist"
-                    else:
-                        search = f"{artist} best songs"
-
-                    return {
-                        "title":        title,
-                        "artist":       artist,
-                        "album":        title if sp_type == "album" else "",
-                        "duration_ms":  0,
-                        "search_query": search,
-                        "source":       "oembed",
-                    }
-    except Exception as e:
-        print(f"Spotify oEmbed error: {e}")
-
     token = await get_spotify_token()
-    if token and sp_type == "track":
+
+    # ── Full Spotify API (best quality metadata) ──────────────────────────
+    if token:
+        headers = {"Authorization": f"Bearer {token}"}
         try:
-            headers = {"Authorization": f"Bearer {token}"}
             async with aiohttp.ClientSession() as s:
                 async with s.get(
                     f"https://api.spotify.com/v1/tracks/{sp_id}",
@@ -627,43 +628,71 @@ async def resolve_spotify(url_or_id: str) -> dict | None:
                         artists = ", ".join(a["name"] for a in d.get("artists", []))
                         album   = d.get("album", {}).get("name", "")
                         dur_ms  = d.get("duration_ms", 0)
+                        # Build the best possible YouTube search query
+                        search  = f"{artists} - {title} official audio"
                         return {
                             "title":        title,
                             "artist":       artists,
                             "album":        album,
                             "duration_ms":  dur_ms,
-                            "search_query": f"{artists} - {title} official audio",
+                            "search_query": search,
                             "source":       "spotify_api",
                         }
         except Exception as e:
             print(f"Spotify API track error: {e}")
 
-    return {
-        "title":        f"Spotify {sp_type}",
-        "artist":       "",
-        "album":        "",
-        "duration_ms":  0,
-        "search_query": f"spotify {sp_type} {sp_id}",
-        "source":       "fallback",
-    }
+    # ── Fallback: oEmbed (no credentials needed) ─────────────────────────
+    try:
+        oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{sp_id}"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    data    = await r.json()
+                    title   = data.get("title", "")
+                    artist  = data.get("author_name", "")
+                    search  = f"{artist} - {title} official audio"
+                    return {
+                        "title":        title,
+                        "artist":       artist,
+                        "album":        "",
+                        "duration_ms":  0,
+                        "search_query": search,
+                        "source":       "oembed",
+                    }
+    except Exception as e:
+        print(f"Spotify oEmbed error: {e}")
+
+    return None
 
 def smart_search_query(raw: str) -> str:
+    """
+    Convert a natural song search like:
+      'blinding lights weeknd'
+      'artist: weeknd song: blinding lights'
+      'weeknd - blinding lights'
+    into the best YouTube search query.
+    """
     raw = raw.strip()
+
+    # Already a URL — return as-is
     if re.match(r'https?://', raw):
         return raw
 
+    # Pattern: "artist - song" or "artist – song"
     dash_match = re.match(r'^(.+?)\s*[-–]\s*(.+)$', raw)
     if dash_match:
         artist = dash_match.group(1).strip()
         song   = dash_match.group(2).strip()
         return f"{artist} - {song} official audio"
 
+    # Pattern: "song by artist"
     by_match = re.match(r'^(.+?)\s+by\s+(.+)$', raw, re.IGNORECASE)
     if by_match:
         song   = by_match.group(1).strip()
         artist = by_match.group(2).strip()
         return f"{artist} - {song} official audio"
 
+    # Pattern: "artist: X song: Y" or "song: X artist: Y"
     kv = {}
     for key in ("artist", "song", "track"):
         match = re.search(rf'{key}[:\s]+([^,\n]+)', raw, re.IGNORECASE)
@@ -673,28 +702,38 @@ def smart_search_query(raw: str) -> str:
         song = kv.get("song") or kv.get("track")
         return f"{kv['artist']} - {song} official audio"
 
+    # Plain text search — just append "audio" for better results
     return f"{raw} audio"
 
 async def resolve_audio(query: str):
+    """
+    Resolve audio URL with:
+    - Smart Spotify resolution (API → oEmbed fallback)
+    - Smart song name/artist search
+    - Multiple YouTube bypass strategies
+    Tries: default → android → tv → ios → mweb
+    """
     import yt_dlp
 
     original_query = query.strip()
     spotify_info   = None
 
+    # ── Spotify URL ───────────────────────────────────────────────────────
     if "open.spotify.com" in original_query:
         spotify_info = await resolve_spotify(original_query)
         if spotify_info:
             query = spotify_info["search_query"]
             print(f"Spotify → YouTube search: {query}")
         else:
+            # Strip to plain text search if resolve fails
             query = re.sub(r'https?://\S+', '', original_query).strip() or original_query
 
+    # ── Smart search for non-URL queries ─────────────────────────────────
     elif not re.match(r'https?://', original_query):
         query = smart_search_query(original_query)
         print(f"Smart search query: {query}")
 
-    # Try strategies with PO token first, then fall back
-    strategies = ["web_creator", "default", "android", "tv", "ios", "mweb", "web_embedded"]
+    strategies = ["default", "android", "tv", "ios", "mweb", "web_embedded"]
     loop = asyncio.get_event_loop()
 
     last_error = None
@@ -707,6 +746,7 @@ async def resolve_audio(query: str):
                     if "entries" in info:
                         info = info["entries"][0]
 
+                    # Pick highest quality audio-only stream
                     fmts = [
                         f for f in info.get("formats", [])
                         if f.get("acodec") != "none"
@@ -725,12 +765,10 @@ async def resolve_audio(query: str):
             url, yt_title, thumb, dur = await loop.run_in_executor(None, _extract)
             print(f"Resolved '{query}' using strategy: {strategy}")
 
+            # Use clean Spotify metadata for title if available
             if spotify_info:
-                if spotify_info.get("artist"):
-                    display_title = f"{spotify_info['artist']} — {spotify_info['title']}"
-                else:
-                    display_title = spotify_info['title']
-                if spotify_info.get("album") and spotify_info["album"] != spotify_info["title"]:
+                display_title = f"{spotify_info['artist']} — {spotify_info['title']}"
+                if spotify_info.get("album"):
                     display_title += f"\n*{spotify_info['album']}*"
             else:
                 display_title = yt_title
@@ -740,10 +778,12 @@ async def resolve_audio(query: str):
         except Exception as e:
             last_error = e
             err_str = str(e)
-            if "Sign in to confirm" in err_str or "bot" in err_str.lower() or "po_token" in err_str.lower():
+            # Only retry on bot-detection errors
+            if "Sign in to confirm" in err_str or "bot" in err_str.lower():
                 print(f"Strategy '{strategy}' blocked, retrying... ({e})")
                 await asyncio.sleep(0.5)
                 continue
+            # For other errors (DRM, private, unavailable), raise immediately
             raise
 
     raise Exception(f"All bypass strategies failed. Last error: {last_error}")
@@ -785,18 +825,12 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel = None):
         if channel:
             if "Sign in" in err_msg or "bot" in err_msg.lower():
                 embed = discord.Embed(
-                    title="⚠️ YouTube Bot Detection (Railway)",
+                    title="⚠️ YouTube Bot Detection",
                     description=(
                         f"Could not play `{url_or_query}`\n\n"
-                        "**Railway Fix Steps:**\n"
-                        "1. **Export fresh cookies** from browser using [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbllbjcglkphssphfagmcdpc)\n"
-                        "2. **Get PO Token**: Run `yt-dlp --extractor-args \"youtube:player-client=web\" --print \"%(po_token)s\" \"https://youtube.com/watch?v=dQw4w9WgXcQ\"` locally\n"
-                        "3. **Set Railway env vars:**\n"
-                        "   - `YOUTUBE_COOKIES_CONTENT` = paste cookies.txt content\n"
-                        "   - `YOUTUBE_PO_TOKEN` = your PO token\n"
-                        "   - `YTDLP_USER_AGENT` = your browser's User-Agent\n"
-                        "4. **Redeploy**\n\n"
-                        "If still failing, use a residential proxy: `YTDLP_PROXY=http://user:pass@host:port`"
+                        "**Fix:** Set the `YTDLP_COOKIES` environment variable to a path of exported YouTube cookies.\n"
+                        "Or set `YTDLP_COOKIES_BROWSER=chrome` (or `firefox`) to use your browser's cookies.\n\n"
+                        "📖 [How to export cookies](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)"
                     ),
                     color=0xff4444
                 )
@@ -954,7 +988,7 @@ async def cmd_coins(interaction: discord.Interaction):
                                             ephemeral=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SLASH COMMANDS — COMMODITIES
+# SLASH COMMANDS — COMMODITIES (with custom timeframe charts)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 COMMODITY_CHOICES = [
@@ -1043,6 +1077,7 @@ async def cmd_commodities_all(interaction: discord.Interaction):
     embed = discord.Embed(title="📊 Live Commodity Prices", color=0xFFD700,
                           timestamp=datetime.datetime.utcnow())
 
+    # Fetch top 8 commodities in parallel
     keys = ["gold", "silver", "oil", "gas", "copper", "wheat", "corn", "coffee"]
     results = await asyncio.gather(*[fetch_commodity_price(k) for k in keys])
 
@@ -1157,32 +1192,507 @@ async def cmd_queue(interaction: discord.Interaction):
     q = music_queues[interaction.guild_id]
     if not q:
         await interaction.response.send_message("Queue is empty.", ephemeral=True); return
-    items = "\n".I see — you're on **Railway**, not Montara. Railway's datacenter IPs are heavily flagged by YouTube. Here's the exact fix.
+    items = "\n".join(f"`{i+1}.` {u[:70]}" for i, u in enumerate(q[:15]))
+    embed = discord.Embed(title=f"📋 Queue ({len(q)} tracks)", description=items, color=0x1db954)
+    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
 
----
+@tree.command(name="nowplaying", description="Show what's currently playing")
+async def cmd_nowplaying(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    np = now_playing.get(interaction.guild_id)
+    if vc and vc.is_playing() and np:
+        embed = discord.Embed(title="🎵 Now Playing", description=f"**{np['title']}**", color=0x1db954)
+        if np.get("thumb"): embed.set_thumbnail(url=np["thumb"])
+        mins, secs = divmod(np.get("dur", 0), 60)
+        embed.add_field(name="Duration", value=f"{mins}:{secs:02d}" if np.get("dur") else "Live")
+        embed.add_field(name="Queue",    value=f"{len(music_queues[interaction.guild_id])} left")
+        embed.add_field(name="Quality",  value="🔊 HD 192kbps")
+        await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
+    else:
+        await interaction.response.send_message("Nothing playing right now.", ephemeral=True)
 
-## Railway-Specific Cookie Setup
+# ═══════════════════════════════════════════════════════════════════════════════
+# SLASH COMMANDS — SMOKING (categorized + targeting)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-### The Problem
-Railway datacenter IPs are heavily flagged by YouTube. Even with cookies, you often need:
-1. **Fresh cookies** (exported within last 30 min)
-2. **Matching User-Agent**
-3. **PO Token** (YouTube's new bot protection, May 2026)
+SMOKE_CATEGORY_CHOICES = [
+    app_commands.Choice(name="😂 Funny / Jokes",             value="funny"),
+    app_commands.Choice(name="🫁 Health Facts",              value="health"),
+    app_commands.Choice(name="☠️ Dangerous / Dark Facts",    value="dangerous"),
+    app_commands.Choice(name="📜 Smoker's Rules",            value="rules"),
+    app_commands.Choice(name="🏷️ Brand Roasts",             value="brands"),
+    app_commands.Choice(name="🎲 Random (all categories)",   value="random"),
+]
 
----
+SMOKE_CATEGORY_META = {
+    "funny":     {"title": "😂 Funny Smoke Thought",       "color": 0xffcc00},
+    "health":    {"title": "🫁 Smoking & Your Health",     "color": 0xff4444},
+    "dangerous": {"title": "☠️ The Dark Side of Smoking",  "color": 0x880000},
+    "rules":     {"title": "📜 The Unwritten Rules",       "color": 0x8b4513},
+    "brands":    {"title": "🏷️ Brand Roast",               "color": 0xaa6644},
+    "random":    {"title": "🚬 Random Smoke Thought",      "color": 0xff6600},
+}
 
-## Step-by-Step: Export Cookies for Railway
+@tree.command(name="smoke", description="Smoking facts, jokes, health warnings, brand roasts — with optional shoutout")
+@app_commands.describe(
+    category="Type of smoking content",
+    target="Optional: mention a user to send the fact at them"
+)
+@app_commands.choices(category=SMOKE_CATEGORY_CHOICES)
+async def cmd_smoke(interaction: discord.Interaction,
+                    category: app_commands.Choice[str] = None,
+                    target: discord.Member = None):
+    cat_key = category.value if category else "random"
 
-### 1. Install Cookie Extension
-- **Chrome**: [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbllbjcglkphssphfagmcdpc)
-- **Firefox**: [cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)
+    if cat_key == "random":
+        all_lines = []
+        for k, lines in SMOKING.items():
+            all_lines.extend([(line, tag, k) for (line, tag) in lines])
+        chosen_line, _, actual_cat = random.choice(all_lines)
+    else:
+        lines = SMOKING.get(cat_key, SMOKING["funny"])
+        chosen_line, _ = random.choice(lines)
+        actual_cat = cat_key
 
-### 2. Get Your PO Token (CRITICAL - YouTube's new requirement)
+    meta  = SMOKE_CATEGORY_META.get(actual_cat, SMOKE_CATEGORY_META["random"])
+    color = meta["color"]
+    title = meta["title"]
 
-YouTube now requires a **PO Token** alongside cookies for cloud IPs.
+    desc = chosen_line
+    if target:
+        desc = f"Hey {target.mention} — {chosen_line}"
 
-**Option A - Automatic (Recommended)**
-```bash
-# Run this ONCE on your local machine with Python installed
-pip install yt-dlp
-yt-dlp --extractor-args "youtube:player-client=web" --print "%(po_token)s" "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    embed = discord.Embed(
+        title=title,
+        description=desc,
+        color=color,
+        timestamp=datetime.datetime.utcnow()
+    )
+
+    cat_labels = {
+        "funny": "😂 Funny", "health": "🫁 Health", "dangerous": "☠️ Dangerous",
+        "rules": "📜 Rules", "brands": "🏷️ Brands"
+    }
+    embed.set_footer(
+        text=f"Category: {cat_labels.get(actual_cat, '🎲 Random')} · /smoke again for another"
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=make_dismiss_view(interaction.user.id)
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SLASH COMMANDS — GIVEAWAY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, giveaway_id: int):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+
+    @discord.ui.button(label="🎉 Enter Giveaway", style=discord.ButtonStyle.success,
+                       custom_id="giveaway_enter")
+    async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gw = active_giveaways.get(self.giveaway_id)
+        if not gw:
+            await interaction.response.send_message("This giveaway no longer exists.", ephemeral=True)
+            return
+        if gw.get("ended"):
+            await interaction.response.send_message("This giveaway has already ended.", ephemeral=True)
+            return
+
+        uid = interaction.user.id
+        if uid in gw["entries"]:
+            gw["entries"].discard(uid)
+            await interaction.response.send_message("❌ You left the giveaway.", ephemeral=True)
+        else:
+            gw["entries"].add(uid)
+            count = len(gw["entries"])
+            await interaction.response.send_message(
+                f"✅ You entered! Total entries: **{count}**", ephemeral=True
+            )
+
+        # Update the embed entry count
+        try:
+            msg   = await interaction.channel.fetch_message(self.giveaway_id)
+            embed = msg.embeds[0]
+            # Update entries field
+            for i, field in enumerate(embed.fields):
+                if "Entries" in field.name:
+                    embed.set_field_at(i, name="👥 Entries", value=str(len(gw["entries"])), inline=True)
+                    break
+            await msg.edit(embed=embed)
+        except: pass
+
+
+@tree.command(name="giveaway", description="Start a giveaway in the current channel")
+@app_commands.describe(
+    prize="What are you giving away?",
+    duration_minutes="How long the giveaway runs (in minutes)",
+    winners="Number of winners (default: 1)",
+    required_role="Optional: only this role can enter"
+)
+@app_commands.default_permissions(manage_guild=True)
+async def cmd_giveaway(interaction: discord.Interaction,
+                       prize: str,
+                       duration_minutes: int,
+                       winners: int = 1,
+                       required_role: discord.Role = None):
+    if duration_minutes < 1 or duration_minutes > 10080:  # max 7 days
+        await interaction.response.send_message(
+            "❌ Duration must be between 1 minute and 7 days (10080 minutes).", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+
+    end_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=duration_minutes)
+    end_ts   = int(end_time.timestamp())
+
+    embed = discord.Embed(
+        title="🎉 GIVEAWAY",
+        description=f"**Prize:** {prize}\n\nClick the button below to enter!\nClick again to leave.",
+        color=0xff69b4,
+        timestamp=end_time
+    )
+    embed.add_field(name="🏆 Winners",   value=str(winners),                    inline=True)
+    embed.add_field(name="👥 Entries",   value="0",                             inline=True)
+    embed.add_field(name="⏰ Ends",      value=f"<t:{end_ts}:R>",               inline=True)
+    embed.add_field(name="🎟️ Hosted by", value=interaction.user.mention,        inline=True)
+    if required_role:
+        embed.add_field(name="🔒 Required Role", value=required_role.mention,   inline=True)
+    embed.set_footer(text=f"Ends at")
+    embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1077777777777777777.png")
+
+    msg = await interaction.followup.send(embed=embed)
+
+    # We need the actual message object — followup returns it
+    try:
+        # Re-fetch to get the real message ID
+        sent_msg = await interaction.channel.fetch_message(msg.id)
+    except:
+        sent_msg = msg
+
+    gw_data = {
+        "prize":         prize,
+        "winners":       winners,
+        "entries":       set(),
+        "host":          interaction.user.id,
+        "channel":       interaction.channel_id,
+        "end_time":      end_time,
+        "ended":         False,
+        "required_role": required_role.id if required_role else None,
+        "message_id":    sent_msg.id,
+    }
+    active_giveaways[sent_msg.id] = gw_data
+
+    view = GiveawayView(sent_msg.id)
+    await sent_msg.edit(embed=embed, view=view)
+
+    # Schedule the end
+    await asyncio.sleep(duration_minutes * 60)
+    await end_giveaway(sent_msg.id, interaction.channel)
+
+
+async def end_giveaway(message_id: int, channel: discord.TextChannel):
+    gw = active_giveaways.get(message_id)
+    if not gw or gw.get("ended"):
+        return
+
+    gw["ended"] = True
+    entries = list(gw["entries"])
+    winners_count = min(gw["winners"], len(entries))
+
+    try:
+        msg = await channel.fetch_message(message_id)
+    except:
+        msg = None
+
+    if not entries:
+        embed = discord.Embed(
+            title="🎉 Giveaway Ended — No Winners",
+            description=f"**Prize:** {gw['prize']}\n\nNo one entered the giveaway. 😢",
+            color=0x808080
+        )
+        if msg:
+            await msg.edit(embed=embed, view=None)
+        await channel.send(embed=embed)
+        return
+
+    winner_ids = random.sample(entries, winners_count)
+    winner_mentions = " ".join(f"<@{uid}>" for uid in winner_ids)
+
+    # Update original message
+    ended_embed = discord.Embed(
+        title="🎉 GIVEAWAY ENDED",
+        description=f"**Prize:** {gw['prize']}\n\n🏆 **Winner(s):** {winner_mentions}",
+        color=0xffd700
+    )
+    ended_embed.add_field(name="Total Entries", value=str(len(entries)), inline=True)
+    ended_embed.add_field(name="Winners",        value=str(winners_count), inline=True)
+    ended_embed.set_footer(text="Giveaway has ended")
+    if msg:
+        await msg.edit(embed=ended_embed, view=None)
+
+    # Announce winners
+    announce_embed = discord.Embed(
+        title="🎊 Giveaway Results!",
+        description=(
+            f"Congratulations {winner_mentions}! 🎉\n\n"
+            f"You won: **{gw['prize']}**\n\n"
+            f"Please contact <@{gw['host']}> to claim your prize."
+        ),
+        color=0xffd700
+    )
+    await channel.send(embed=announce_embed)
+
+
+@tree.command(name="giveaway_end", description="End a giveaway early and pick a winner")
+@app_commands.describe(message_id="Message ID of the giveaway to end")
+@app_commands.default_permissions(manage_guild=True)
+async def cmd_giveaway_end(interaction: discord.Interaction, message_id: str):
+    try:
+        mid = int(message_id)
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
+        return
+
+    gw = active_giveaways.get(mid)
+    if not gw:
+        await interaction.response.send_message(
+            "❌ No active giveaway with that message ID.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message("✅ Ending giveaway early...", ephemeral=True)
+    await end_giveaway(mid, interaction.channel)
+
+
+@tree.command(name="giveaway_reroll", description="Re-roll a winner for an ended giveaway")
+@app_commands.describe(message_id="Message ID of the ended giveaway")
+@app_commands.default_permissions(manage_guild=True)
+async def cmd_giveaway_reroll(interaction: discord.Interaction, message_id: str):
+    try:
+        mid = int(message_id)
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
+        return
+
+    gw = active_giveaways.get(mid)
+    if not gw:
+        await interaction.response.send_message("❌ Giveaway not found.", ephemeral=True)
+        return
+    if not gw.get("ended"):
+        await interaction.response.send_message("❌ Giveaway is still active.", ephemeral=True)
+        return
+
+    entries = list(gw["entries"])
+    if not entries:
+        await interaction.response.send_message("❌ No entries to re-roll from.", ephemeral=True)
+        return
+
+    new_winner = random.choice(entries)
+    embed = discord.Embed(
+        title="🔄 Giveaway Re-roll!",
+        description=(
+            f"🎊 New winner: <@{new_winner}>\n\n"
+            f"**Prize:** {gw['prize']}\n"
+            f"Please contact <@{gw['host']}> to claim."
+        ),
+        color=0x00ff88
+    )
+    await interaction.response.send_message(embed=embed)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SLASH COMMANDS — ADMIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@tree.command(name="setcmdchannel", description="Restrict a command to a specific channel")
+@app_commands.describe(command_name="Command name (price, chart, play ...)",
+                       channel="Channel to allow it in")
+@app_commands.default_permissions(administrator=True)
+async def cmd_setchannel(interaction: discord.Interaction,
+                         command_name: str, channel: discord.TextChannel):
+    gid = str(interaction.guild_id)
+    guild_settings[gid]["channel_restrictions"].setdefault(command_name, []).append(channel.id)
+    embed = discord.Embed(title="✅ Channel Restriction Set",
+                          description=f"`/{command_name}` → {channel.mention}", color=0x00ff88)
+    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
+
+@tree.command(name="setcmdrole", description="Restrict a command to a specific role")
+@app_commands.describe(command_name="Command name", role="Role that can use it")
+@app_commands.default_permissions(administrator=True)
+async def cmd_setrole(interaction: discord.Interaction, command_name: str, role: discord.Role):
+    gid = str(interaction.guild_id)
+    guild_settings[gid]["role_restrictions"].setdefault(command_name, []).append(role.id)
+    embed = discord.Embed(title="✅ Role Restriction Set",
+                          description=f"`/{command_name}` → {role.mention}", color=0x00ff88)
+    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
+
+@tree.command(name="clearcmdrestrictions", description="Remove all restrictions for a command")
+@app_commands.describe(command_name="Command to unrestrict")
+@app_commands.default_permissions(administrator=True)
+async def cmd_clear(interaction: discord.Interaction, command_name: str):
+    gid = str(interaction.guild_id)
+    guild_settings[gid]["channel_restrictions"].pop(command_name, None)
+    guild_settings[gid]["role_restrictions"].pop(command_name, None)
+    await interaction.response.send_message(f"✅ Restrictions cleared for `/{command_name}`.",
+                                             view=make_dismiss_view(interaction.user.id))
+
+@tree.command(name="settings", description="View current command restrictions")
+@app_commands.default_permissions(administrator=True)
+async def cmd_settings(interaction: discord.Interaction):
+    gid = str(interaction.guild_id)
+    s   = guild_settings[gid]
+    embed = discord.Embed(title="⚙️ Server Settings", color=0x7289da)
+    ch = s["channel_restrictions"]
+    embed.add_field(
+        name="Channel Restrictions",
+        value="\n".join(f"`/{k}` → " + " ".join(f"<#{c}>" for c in v)
+                        for k, v in ch.items()) or "None",
+        inline=False
+    )
+    ro = s["role_restrictions"]
+    embed.add_field(
+        name="Role Restrictions",
+        value="\n".join(f"`/{k}` → " + " ".join(f"<@&{r}>" for r in v)
+                        for k, v in ro.items()) or "None",
+        inline=False
+    )
+    await interaction.response.send_message(embed=embed,
+                                             view=make_dismiss_view(interaction.user.id),
+                                             ephemeral=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GENERAL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@tree.command(name="help", description="All commands")
+async def cmd_help(interaction: discord.Interaction):
+    embed = discord.Embed(title="📖 Commands", color=0x5865F2,
+                          timestamp=datetime.datetime.utcnow())
+    sections = {
+        "💰 Crypto": [
+            "/price <symbol>",
+            "/chart <symbol> [days]",
+            "/top [count]",
+            "/compare <coin1> <coin2>",
+            "/trending",
+            "/fomo <symbol> <amount> <days_ago>",
+            "/coins",
+        ],
+        "🥇 Commodities": [
+            "/commodity <item> [days] — dropdown with 19 commodities",
+            "/commodities — show all prices at once",
+            "Timeframes: 7 / 14 / 30 / 90 / 180 / 365 days",
+        ],
+        "🎵 Music": [
+            "/play <song/URL/Spotify>",
+            "/skip  /stop  /queue  /nowplaying",
+            "🔊 HD 192kbps with loudnorm",
+        ],
+        "🚬 Smoking": [
+            "/smoke [category] [target]",
+            "Categories: funny · health · dangerous · rules · brands · random",
+            "Target: @ a user to send the fact at them",
+        ],
+        "🎉 Giveaways": [
+            "/giveaway <prize> <minutes> [winners] [role]",
+            "/giveaway_end <message_id>",
+            "/giveaway_reroll <message_id>",
+        ],
+        "⚙️ Admin": [
+            "/setcmdchannel  /setcmdrole",
+            "/clearcmdrestrictions  /settings",
+        ],
+    }
+    for sec, cmds in sections.items():
+        embed.add_field(name=sec, value="\n".join(f"`{c}`" for c in cmds), inline=False)
+    embed.set_footer(text="Only the person who ran a command can dismiss its response")
+    await interaction.response.send_message(embed=embed,
+                                             view=make_dismiss_view(interaction.user.id),
+                                             ephemeral=True)
+
+@tree.command(name="ping", description="Bot latency")
+async def cmd_ping(interaction: discord.Interaction):
+    ms    = round(bot.latency * 1000)
+    color = 0x00ff88 if ms < 100 else 0xffaa00 if ms < 200 else 0xff4444
+    embed = discord.Embed(title="🏓 Pong", description=f"**{ms}ms**", color=color)
+    await interaction.response.send_message(embed=embed, view=make_dismiss_view(interaction.user.id))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EVENTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.event
+async def on_ready():
+    print(f"\n{'='*50}\n  {bot.user}  ({bot.user.id})\n  Guilds: {len(bot.guilds)}\n{'='*50}")
+    try:
+        synced = await tree.sync()
+        print(f"Synced {len(synced)} commands")
+    except Exception as e:
+        print(f"Sync error: {e}")
+    await bot.change_presence(activity=discord.Activity(
+        type=discord.ActivityType.watching, name="📈 Markets | /help"))
+
+@bot.event
+async def on_app_command_error(interaction: discord.Interaction, error):
+    print(f"Cmd error: {error}")
+    msg = f"❌ {error}"
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
+    except:
+        pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KEEPALIVE + MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def keepalive():
+    from aiohttp import web
+    app = web.Application()
+    async def health(r): return web.Response(text="🟢 alive")
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8080")))
+    await site.start()
+    print(f"Health check on :{os.getenv('PORT', '8080')}")
+
+async def main():
+    async with bot:
+        await setup_cookies()
+        await keepalive()
+        await bot.start(BOT_TOKEN)
+
+if __name__ == "__main__":
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("Set BOT_TOKEN env var")
+        sys.exit(1)
+    asyncio.run(main())
+
+async def setup_cookies():
+    content = os.getenv("YOUTUBE_COOKIES_CONTENT", "")
+    if content:
+        path = "/tmp/yt_cookies.txt"
+        with open(path, "w") as f:
+            f.write(content)
+        os.environ["YTDLP_COOKIES"] = path
+        print(f"✅ YouTube cookies written ({len(content)} chars)")
+    else:
+        existing = os.getenv("YTDLP_COOKIES", "")
+        if existing and os.path.exists(existing):
+            print(f"✅ Using existing cookies file: {existing}")
+        else:
+            print("⚠️  No YouTube cookies — set YOUTUBE_COOKIES_CONTENT in Railway")
+    sp_id  = os.getenv("SPOTIFY_CLIENT_ID", "")
+    sp_sec = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+    if sp_id and sp_sec:
+        print(f"✅ Spotify API configured")
+    else:
+        print("ℹ️  Spotify using oEmbed fallback (set SPOTIFY_CLIENT_ID + SPOTIFY_CLIENT_SECRET for better results)")
